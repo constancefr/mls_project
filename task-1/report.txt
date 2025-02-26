@@ -1,0 +1,35 @@
+In the Task 1 report, you are required to answer the following questions:
+
+1. How did you implement four distinct distance functions on the GPU?
+2. What is the speed advantage of the GPU over the CPU version when the dimension is 2? Additionally, what is the speed advantage when the dimension is 2^15?
+3. Please provide a detailed description of your Top K algorithm.
+4. What steps did you undertake to implement the Top K on the GPU? How do you manage data within GPU memory?
+5. When processing 4,000 vectors, how many seconds does the operation take? Furthermore, when handling 4,000,000 vectors, what modifications did you implement to ensure the effective functioning of your code?
+
+In the Task 2 report, you are required to answer the following questions:
+
+1. How did you implement your K-means algorithm on the GPU?
+2. What is the speed advantage of the GPU over the CPU version when the dimension is 2? Additionally, what is the speed advantage when the dimension is 1024?
+3. Please provide a detailed description of your ANN algorithm.
+4. If you implemented another clustering algorithm/ANN algorithm, which algorithm did you use?
+
+You can write a report by discussing from the following aspects:
+
+Implementation Analysis
+
+Describe your implementation approach on GPU
+Include code snippets and explain key optimization techniques used
+Discuss any challenges encountered and how they were resolved
+Performance Comparison
+
+Conduct benchmarking tests comparing GPU vs CPU(numpy) implementations
+Present results in a table/figure showing execution times and speedup ratios
+Analyze the factors contributing to performance differences
+Scalability Analysis
+
+Benchmark performance with small number of vectors
+Report execution time and resource utilization (e.g. GPU memory usage/GPU utilization if you can measure it)
+Scale testing to large number of vectors
+Document optimization techniques used
+Compare performance before and after optimizations
+Analyze memory usage and bottlenecks
