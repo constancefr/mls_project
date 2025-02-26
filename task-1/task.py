@@ -44,64 +44,8 @@ def distance_manhattan(X, Y):
 
 # You can create any kernel here
 
-def our_kmeans(N, D, A, K, max_iters=100, tol=1e-4):
-    """
-    Perform KMeans clustering on dataset A using L2 distance (via distance_l2).
 
-    Parameters:
-      N (int): Number of vectors.
-      D (int): Dimension of vectors.
-      A (numpy.ndarray): Data matrix of shape (N, D).
-      K (int): Number of clusters.
-      max_iters (int): Maximum number of iterations.
-      tol (float): Convergence tolerance based on centroid movement.
-
-    Returns:
-      numpy.ndarray: An array of shape (N,) containing the cluster assignment (ID)
-                     for each vector.
-    """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    A_tensor = torch.tensor(A, dtype=torch.float32, device=device)  # (N, D)
-
-    # Randomly select K points from A as initial centroids.
-    indices = torch.randperm(N)[:K]
-    centroids = A_tensor[indices]  # (K, D)
-
-    for iteration in range(max_iters):
-        # Assignment step: for each point, compute its distance to every centroid using distance_l2.
-        assignments = torch.empty(N, dtype=torch.long, device=device)
-        for i in range(N):
-            dists = []
-            for j in range(K):
-                d = distance_l2(A_tensor[i], centroids[j])
-                dists.append(d)
-            dists = torch.stack(dists)  # (K,)
-            assignments[i] = torch.argmin(dists)
-
-        # Update step: recalc centroids as the mean of points assigned to each cluster.
-        new_centroids = []
-        for j in range(K):
-            # Get indices of all points assigned to cluster j.
-            cluster_indices = (assignments == j).nonzero(as_tuple=False).squeeze()
-            if cluster_indices.numel() == 0:
-                # If a cluster gets no points, reinitialize its centroid randomly.
-                new_centroid = A_tensor[torch.randint(0, N, (1,))]
-            else:
-                cluster_points = A_tensor[cluster_indices]
-                new_centroid = torch.mean(cluster_points, dim=0, keepdim=True)  # (1, D)
-            new_centroids.append(new_centroid)
-        new_centroids = torch.cat(new_centroids, dim=0)  # (K, D)
-
-        # Check for convergence: if centroids move less than tol, stop.
-        if torch.norm(new_centroids - centroids) < tol:
-            centroids = new_centroids
-            break
-        centroids = new_centroids
-
-    return assignments.cpu().numpy()
-
-
-def baseline_knn(N, D, A, X, K):
+def our_knn(N, D, A, X, K):
     """
     Baseline KNN implementation using NumPy for true nearest neighbor search.
     
@@ -309,7 +253,7 @@ if __name__ == "__main__":
     N, D, A, X, K = testdata_ann("")
     
     # Compute baseline KNN result
-    baseline_result = baseline_knn(N, D, A, X, K)
+    baseline_result = our_knn(N, D, A, X, K)
     print("Baseline KNN indices:", baseline_result)
     
     # Compute ANN result
