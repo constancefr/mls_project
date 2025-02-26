@@ -10,20 +10,20 @@ from test import testdata_kmeans, testdata_knn, testdata_ann
 def distance_manhattan(X, Y):
     return torch.sum(torch.abs(X - Y))
 
+def distance_l2(X, Y):
+    return (X-Y).norm(2)
+
 # ------------------------------------------------------------------------------------------------
 # Your Task 1.2 code here
 # ------------------------------------------------------------------------------------------------
 
 
 def our_knn(N, D, A, X, K):
-    A = A.to(device)
-    X = X.to(device)
-
-    indices_list = []
-    distances = torch.sum(torch.abs(A - X), dim=1)  # Compute Manhattan distances
-    _, indices = torch.topk(distances, K, largest=False)  # Get K nearest neighbors
-
-    return indices
+    def f(Y):
+        return distance_l2(X,Y)
+    distance = torch.vmap(f)(A)
+    _, indices = distance.sort()
+    return indices[:K]
 
 def our_knn_batching(N, D, X, K, batch_size=500000, use_gpu=False):
     indices_list = []
@@ -43,63 +43,54 @@ def our_knn_batching(N, D, X, K, batch_size=500000, use_gpu=False):
     return torch.cat(indices_list)
 
 
+
 # ------------------------------------------------------------------------------------------------
 # Your Task 2.1 code here
 # ------------------------------------------------------------------------------------------------
 
-def our_kmeans(N, D, A, K, max_iters=100, tol=1e-4):
-    A = A.to(device)
+def our_kmeans(N, D, A, K):
+    indices = torch.randperm(N, device=A.device)[:K]
+    centroids = A[indices]
+    def f(Y):
+        return torch.vmap(lambda x: distance_l2(x, Y))(centroids)
+    while True:
+        distances = torch.vmap(f)(A)
 
-    # Initialize centroids
-    indices = torch.randperm(N, device=device)[:K]
-    centroids = A[indices].clone()
+        # Assign each point to the nearest centroid
+        assignments = torch.argmin(distances, dim=1)
 
-    for _ in range(max_iters):
-        cluster_ids = torch.empty(N, device=device, dtype=torch.long)
+        # Update centroids using vectorized operations
+        mask = torch.zeros(N, K, dtype=A.dtype, device=A.device)
+        mask[torch.arange(N, device=A.device), assignments] = 1.0
+        counts = mask.sum(dim=0)  # Shape (K,)
+        sums = torch.mm(mask.T, A)  # Shape (K, D)
+        new_centroids = sums / counts.unsqueeze(1)
 
-        distances = torch.cdist(A, centroids, p=2)
-        cluster_ids = torch.argmin(distances, dim=1)
-
-        # Compute new centroids
-        new_centroids = torch.zeros_like(centroids)
-        counts = torch.zeros(K, device=device)
-
-        for i in range(K):
-            mask = (cluster_ids == i)
-            if mask.any():
-                new_centroids[i] = A[mask].mean(dim=0)
-                counts[i] = mask.sum()
-            else:
-                new_centroids[i] = A[torch.randint(0, N, (1,), device=device)].clone()
-
-        if torch.norm(centroids - new_centroids) < tol:
+        # Check for centroid convergence
+        centroid_shift = torch.norm(new_centroids - centroids, dim=1).max()
+        if centroid_shift < 1e-4:
             break
-
         centroids = new_centroids
-
-    return cluster_ids
+    return assignments, centroids
 
 # ------------------------------------------------------------------------------------------------
 # Your Task 2.2 code here
 # ------------------------------------------------------------------------------------------------
 
-def our_ann(N, D, A, X, K, K1=5, K2=10):
-    if(D <= K1):
-        K1 = D-1
-    if(D <= K2):
-        K2 = D-1
-    cluster_ids = our_kmeans(N, D, A, K1)
+def our_knn_filter(A,X,K):        
+    def f(Y):
+        return distance_l2(X,Y)
+    distance = torch.vmap(f)(A)
+    _, indices = distance.sort()
+    return indices < K
 
-    # Find closest clusters to X
-    cluster_distances = torch.cdist(X.view(1, -1), A, p=2)
-    nearest_clusters = torch.topk(cluster_distances, K1, largest=False).indices
+def our_ann(N, D, A, X, K):
 
-    # Find K2 nearest neighbors within those clusters
-    filtered_vectors = A[nearest_clusters.view(-1)]
-    K2 = min(K2, len(filtered_vectors)) 
-    knn_indices = our_knn(len(filtered_vectors), D, filtered_vectors, X, K2)
-
-    return knn_indices[:K]
+    assignments, means = our_kmeans(N, D, X, 5)
+    nearest_means = our_knn_filter(means, X, 2)
+    mask = nearest_means[assignments]
+    filtered = A[mask]
+    return our_knn(N, D, filtered, X, K)
 
 # ------------------------------------------------------------------------------------------------
 # Test your code here
