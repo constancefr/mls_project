@@ -32,13 +32,7 @@ def our_knn_batching(N, D, X, K, batch_size=500000, use_gpu=False):
         # Generate A by using small batches
         A_batch = torch.rand((batch_size, D), dtype=torch.float32, device=device if use_gpu else "cpu")
 
-        # Compute Manhattan distances
-        distances = torch.sum(torch.abs(A_batch - X), dim=1)
-
-        # Get K nearest neighbors
-        _, batch_indices = torch.topk(distances, K, largest=False)
-
-        indices_list.append(batch_indices)
+        indices_list.append(our_knn(N,D,A_batch,X,K))
 
     return torch.cat(indices_list)
 
