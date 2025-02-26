@@ -36,7 +36,7 @@ def our_knn(N, D, A, X, K):
         return distance_l2(X,Y)
     distance = torch.vmap(f)(A)
     _, indices = distance.sort()
-    return A[indices[:K]]
+    return indices[:K]
 
 # ------------------------------------------------------------------------------------------------
 # Your Task 2.1 code here
@@ -49,7 +49,7 @@ def our_knn(N, D, A, X, K):
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 def our_kmeans(N, D, A, K):
-    indices = torch.randperm(N, device=device)[:K]
+    indices = torch.randperm(N, device=A.device)[:K]
     centroids = A[indices]
     def f(Y):
         return torch.vmap(lambda x: distance_l2(x, Y))(centroids)
