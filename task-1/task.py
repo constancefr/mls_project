@@ -17,10 +17,10 @@ def distance_cosine(X, Y):
     pass
 
 def distance_l2(X, Y):
-    pass
+    return (X-Y).norm(2)
 
 def distance_dot(X, Y):
-    pass
+    return X @ Y
 
 def distance_manhattan(X, Y):
     pass
@@ -32,7 +32,11 @@ def distance_manhattan(X, Y):
 # You can create any kernel here
 
 def our_knn(N, D, A, X, K):
-    pass
+    def f(Y):
+        return distance_l2(X,Y)
+    distance = torch.vmap(f)(A)
+    _, indices = distance.sort()
+    return A[indices[:K]]
 
 # ------------------------------------------------------------------------------------------------
 # Your Task 2.1 code here
@@ -42,8 +46,32 @@ def our_knn(N, D, A, X, K):
 # def distance_kernel(X, Y, D):
 #     pass
 
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
 def our_kmeans(N, D, A, K):
-    pass
+    indices = torch.randperm(N, device=device)[:K]
+    centroids = A[indices]
+    def f(Y):
+        return torch.vmap(lambda x: distance_l2(x, Y))(centroids)
+    while True:
+        distances = torch.vmap(f)(A)
+
+        # Assign each point to the nearest centroid
+        assignments = torch.argmin(distances, dim=1)
+
+        # Update centroids using vectorized operations
+        mask = torch.zeros(N, K, dtype=A.dtype, device=A.device)
+        mask[torch.arange(N, device=A.device), assignments] = 1.0
+        counts = mask.sum(dim=0)  # Shape (K,)
+        sums = torch.mm(mask.T, A)  # Shape (K, D)
+        new_centroids = sums / counts.unsqueeze(1)
+
+        # Check for centroid convergence
+        centroid_shift = torch.norm(new_centroids - centroids, dim=1).max()
+        if centroid_shift < 1e-4:
+            break
+        centroids = new_centroids
+    return assignments, centroids
 
 # ------------------------------------------------------------------------------------------------
 # Your Task 2.2 code here
@@ -51,8 +79,20 @@ def our_kmeans(N, D, A, K):
 
 # You can create any kernel here
 
+def our_knn_filter(A,X,K):        
+    def f(Y):
+        return distance_l2(X,Y)
+    distance = torch.vmap(f)(A)
+    _, indices = distance.sort()
+    return indices < K
+
 def our_ann(N, D, A, X, K):
-    pass
+
+    assignments, means = our_kmeans(N, D, X, 5)
+    nearest_means = our_knn_filter(means, X, 2)
+    mask = nearest_means[assignments]
+    filtered = A[mask]
+    return our_knn(N, D, filtered, X, K)
 
 # ------------------------------------------------------------------------------------------------
 # Test your code here
