@@ -1,5 +1,5 @@
 import torch
-# import cupy as cp
+import cupy as cp
 # import triton
 import numpy as np
 import time
@@ -9,10 +9,25 @@ from test import testdata_kmeans, testdata_knn, testdata_ann
 # ------------------------------------------------------------------------------------------------
 # HELPERS
 # ------------------------------------------------------------------------------------------------
+def warm_up_cpu():
+    # Run a simple CPU operation to warm up caches and branch predictor
+    warm_up_data = np.zeros(1, dtype=np.float32)  # Allocate a small array
+    warm_up_data += 1  # Perform a simple operation
+
+def warm_up_gpu():
+    # Run a simple GPU operation to initialize CUDA and warm up the GPU
+    warm_up_data = cp.zeros(1, dtype=cp.float32)  # Allocate a small array on the GPU
+    warm_up_data += 1  # Perform a simple operation
+    cp.cuda.Stream.null.synchronize()  # Synchronize to ensure the operation completes
 
 def measure_time(func, device, *args):
     # Ensure tensors are on the correct device
     torch.cuda.synchronize() if device == "cuda" else None  
+
+    if device == "cuda":
+        warm_up_gpu()
+    else:
+        warm_up_cpu()
 
     start_time = time.time()  # Start the timer
     result = func(*args)  # Run the function
@@ -140,6 +155,113 @@ Possible optimisations:
 # def distance_kernel(X, Y, D):
 #     pass
 
+def kmeans_cupy(N, D, A, K, max_iters=100, tol=1e-4):
+    # Convert input data to CuPy arrays
+    A = cp.asarray(A, dtype=cp.float32)
+    
+    # Step 1: Initialize K random centroids
+    indices = cp.random.choice(N, K, replace=False)
+    centroids = A[indices].copy()
+    
+    for _ in range(max_iters):
+        # Step 2a: Compute distances and assign clusters
+        distances = cp.linalg.norm(A[:, cp.newaxis] - centroids, axis=2)  # Shape: (N, K)
+        cluster_assignments = cp.argmin(distances, axis=1)  # Shape: (N,)
+        
+        # Step 2b: Update centroids using advanced indexing and reduction
+        new_centroids = cp.zeros((K, D), dtype=cp.float32)
+        for k in range(K):
+            mask = cluster_assignments == k
+            if cp.any(mask):
+                new_centroids[k] = cp.mean(A[mask], axis=0)
+        
+        # Step 3: Check for convergence
+        if cp.linalg.norm(new_centroids - centroids) < tol:
+            break
+        centroids = new_centroids
+    
+    return cluster_assignments.get()
+
+# --------OPTIMISED CUPY KMEANS-------------
+# Custom kernel for distance computation
+distance_kernel = cp.RawKernel(r'''
+extern "C" __global__
+void distance_kernel(const float* A, const float* centroids, float* distances, int N, int D, int K) {
+    int tid = blockDim.x * blockIdx.x + threadIdx.x;  // Thread ID
+    if (tid < N * K) {
+        int n = tid / K;  // Data point index
+        int k = tid % K;  // Centroid index
+        float dist = 0.0f;
+        for (int d = 0; d < D; d++) {
+            float diff = A[n * D + d] - centroids[k * D + d];
+            dist += diff * diff;
+        }
+        distances[n * K + k] = sqrtf(dist);
+    }
+}
+''', 'distance_kernel')
+
+# Custom kernel for centroid updates
+centroid_update_kernel = cp.RawKernel(r'''
+extern "C" __global__
+void centroid_update_kernel(const float* A, const int* cluster_assignments, float* new_centroids, int* counts, int N, int D, int K) {
+    int tid = blockDim.x * blockIdx.x + threadIdx.x;  // Thread ID
+    if (tid < N) {
+        int k = cluster_assignments[tid];  // Cluster assignment for this point
+        for (int d = 0; d < D; d++) {
+            atomicAdd(&new_centroids[k * D + d], A[tid * D + d]);
+        }
+        atomicAdd(&counts[k], 1);
+    }
+}
+''', 'centroid_update_kernel')
+
+def kmeans_cupy_custom_kernels(N, D, A, K, max_iters=100, tol=1e-4):
+    A = cp.asarray(A, dtype=cp.float32)
+    
+    # Step 1: Initialize K random centroids
+    indices = cp.random.choice(N, K, replace=False)
+    centroids = A[indices].copy()
+    
+    # Allocate memory for distances and cluster assignments
+    distances = cp.zeros((N, K), dtype=cp.float32)
+    cluster_assignments = cp.zeros(N, dtype=cp.int32)
+    
+    # Define thread and block sizes
+    threads_per_block = 256
+    blocks_per_grid_distance = (N * K + threads_per_block - 1) // threads_per_block
+    blocks_per_grid_centroid = (N + threads_per_block - 1) // threads_per_block
+    
+    for _ in range(max_iters):
+        old_centroids = centroids.copy()
+        
+        # Step 2a: Compute distances using the custom kernel
+        distance_kernel((blocks_per_grid_distance,), (threads_per_block,), 
+                        (A, centroids, distances, N, D, K))
+        
+        # Step 2b: Assign clusters
+        cluster_assignments = cp.argmin(distances, axis=1)
+        
+        # Step 2c: Update centroids using the custom kernel
+        new_centroids = cp.zeros((K, D), dtype=cp.float32)
+        counts = cp.zeros(K, dtype=cp.int32)
+        centroid_update_kernel((blocks_per_grid_centroid,), (threads_per_block,), 
+                              (A, cluster_assignments, new_centroids, counts, N, D, K))
+        
+        # Normalize centroids
+        mask = counts > 0
+        new_centroids[mask] /= counts[mask, cp.newaxis]
+        
+        # Step 3: Check for convergence
+        if cp.linalg.norm(new_centroids - centroids) < tol:
+            break
+        centroids = new_centroids
+    
+    return cluster_assignments.get()
+
+# ------------------------------------------
+
+
 def our_kmeans(N, D, A, K, max_iters=100, tol = 1e-4, device="cuda"):
     """
     Perform K-Means clustering on a dataset.
@@ -261,15 +383,33 @@ def our_ann(N, D, A, X, K, K1=5, K2=10, device="cuda"):
 # ------------------------------------------------------------------------------------------------
 
 # Example
-def test_kmeans():
+def test_kmeans_torch():
+    N, D, A, K = testdata_kmeans("")
+    measure_time(our_kmeans, "cpu", N, D, A, K) # warmup
+    cpu_result, cpu_time = measure_time(our_kmeans, "cpu", N, D, A, K)
+    gpu_torch_result, gpu_torch_time = measure_time(our_kmeans, "cuda", N, D, A, K)
+    print(f"Kmeans CPU time: {cpu_time:.6f} sec")
+    print(f"Kmeans Torch GPU time: {gpu_torch_time:.6f} sec")
+
+    return N, D, "KMeans Torch", cpu_time, gpu_torch_time
+
+def test_kmeans_cupy():
     N, D, A, K = testdata_kmeans("")
     cpu_result, cpu_time = measure_time(our_kmeans, "cpu", N, D, A, K)
-    gpu_result, gpu_time = measure_time(our_kmeans, "cuda", N, D, A, K)
+    gpu_cupy_result, gpu_cupy_time = measure_time(kmeans_cupy, "cuda", N, D, A, K)
     print(f"Kmeans CPU time: {cpu_time:.6f} sec")
-    print(f"Kmeans GPU time: {gpu_time:.6f} sec")
+    print(f"Kmeans CuPy GPU time: {gpu_cupy_time:.6f} sec")
 
-    return N, D, "KMeans", cpu_time, gpu_time
+    return N, D, "KMeans CuPy", cpu_time, gpu_cupy_time
 
+def test_kmeans_cupy_optimised():
+    N, D, A, K = testdata_kmeans("")
+    cpu_result, cpu_time = measure_time(our_kmeans, "cpu", N, D, A, K)
+    gpu_cupy_opt_result, gpu_cupy_opt_time = measure_time(kmeans_cupy_custom_kernels, "cuda", N, D, A, K)
+    print(f"Kmeans CPU time: {cpu_time:.6f} sec")
+    print(f"Kmeans CuPy optimised GPU time: {gpu_cupy_opt_time:.6f} sec")
+
+    return N, D, "KMeans CuPy Opt.", cpu_time, gpu_cupy_opt_time
 
 def test_knn():
     N, D, A, X, K = testdata_knn("")
@@ -311,7 +451,9 @@ if __name__ == "__main__":
     np.random.seed(123)
 
     results = []
-    results.append(test_kmeans())
+    results.append(test_kmeans_torch())
+    results.append(test_kmeans_cupy())
+    results.append(test_kmeans_cupy_optimised())
     results.append(test_knn())
     results.append(test_ann())
     print_table(results)
