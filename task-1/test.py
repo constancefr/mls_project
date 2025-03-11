@@ -15,8 +15,8 @@ def read_data(file_path=""):
 def testdata_kmeans(test_file):
     if test_file == "":
         # use random data
-        N = 1000
-        D = 100
+        N = 10000
+        D = 1024
         A = np.random.randn(N, D)
         K = 10
         return N, D, A, K

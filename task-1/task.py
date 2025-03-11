@@ -160,11 +160,15 @@ def kmeans_cupy(N, D, A, K, max_iters=100, tol=1e-4):
     A = cp.asarray(A, dtype=cp.float32)
     
     # Step 1: Initialize K random centroids
+    # print("A: ", A)
     indices = cp.random.choice(N, K, replace=False)
     centroids = A[indices].copy()
+    # print("Init. centroid indices: ", indices)
+    # print("Init. centroids: ", centroids)
     
     for _ in range(max_iters):
         # Step 2a: Compute distances and assign clusters
+        # -> USE L2 / COSINE????
         distances = cp.linalg.norm(A[:, cp.newaxis] - centroids, axis=2)  # Shape: (N, K)
         cluster_assignments = cp.argmin(distances, axis=1)  # Shape: (N,)
         
@@ -385,7 +389,7 @@ def our_ann(N, D, A, X, K, K1=5, K2=10, device="cuda"):
 # Example
 def test_kmeans_torch():
     N, D, A, K = testdata_kmeans("")
-    measure_time(our_kmeans, "cpu", N, D, A, K) # warmup
+    measure_time(our_kmeans, "cpu", N, D, A, 1) # warmup
     cpu_result, cpu_time = measure_time(our_kmeans, "cpu", N, D, A, K)
     gpu_torch_result, gpu_torch_time = measure_time(our_kmeans, "cuda", N, D, A, K)
     print(f"Kmeans CPU time: {cpu_time:.6f} sec")
