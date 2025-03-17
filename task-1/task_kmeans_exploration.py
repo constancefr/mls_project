@@ -32,194 +32,18 @@ def measure_time(func, device, *args):
 
 def print_table(results):
     print("Benchmark - CPU vs GPU Performance")
-    print(" N       | D        | Function             | CPU Time (s)  | GPU Time (s)  | Speedup ")
+    print(" N       | D        | Function                       | CPU Time (s)  | GPU Time (s)  | Speedup ")
     print("---------------------------------------------------------------------------------------------------")
     for result in results:
         N, D, func, cpu_time, gpu_time = result
         speedup = cpu_time / gpu_time
-        print(f"{N:<8} | {D:<8} | {func:<20} | {cpu_time:.6f}      | {gpu_time:.6f}      | {speedup:.2f}x")
+        print(f"{N:<8} | {D:<8} | {func:<24}       | {cpu_time:.6f}      | {gpu_time:.6f}      | {speedup:.2f}x")
 
 # ------------------------------------------------------------------------------------------------
 # Your Task 2.1 code here
 # ------------------------------------------------------------------------------------------------
 
-def distance_l2_cupy(A, centroids):
-    # print(f"A type: {type(A)}, centroids type: {type(centroids)}")
-    
-    diff = A[:, cp.newaxis, :] - centroids[cp.newaxis, :, :]  # Should be CuPy
-    # print(f"diff type: {type(diff)}")  # 🔍 Check if it's CuPy or PyTorch
-
-    distances = cp.sum(diff ** 2, axis=2)  
-    return distances
-
-def kmeans_cupy(N, D, A, K, max_iters=100, tol=1e-4):
-    """
-    Perform K-Means clustering on a dataset using CuPy.
-
-    Args:
-        N (int): Number of data points
-        D (int): Dimension of each data point
-        A (cp.ndarray): Array of shape (N, D), dataset
-        K (int): Number of clusters
-        max_iters (int): Maximum number of iterations
-        tol (float): Convergence tolerance (threshold for centroid movement)
-    
-    Returns:
-        cp.ndarray: Array of shape (N,) with cluster assignments
-    """
-
-    if isinstance(A, np.ndarray):
-        A = cp.array(A, dtype=cp.float32)
-
-    # Step 1: Initialize K random points from A as initial centroids
-    indices = cp.random.permutation(N)[:K]
-    centroids = A[indices].copy()
-
-    if isinstance(A, torch.Tensor):
-        A = cp.asarray(A.cpu().numpy(), dtype=cp.float32)
-    if isinstance(centroids, torch.Tensor):
-        centroids = cp.asarray(centroids.cpu().numpy(), dtype=cp.float32)
-
-    for _ in range(max_iters):
-        old_centroids = centroids.copy()
-
-        # Step 2a: Assignment Step - Compute distances and assign clusters
-        distances = distance_l2_cupy(A, centroids)  # A: (N, D), centroids: (K, D)
-        cluster_assignments = distances.argmin(axis=1)  # Shape (N,)
-
-        # Step 2b: Update Step - Compute new centroids
-        centroids = cp.zeros((K, D), dtype=cp.float32)  # Placeholder for new centroids
-        counts = cp.zeros(K, dtype=cp.float32)  # Count points per cluster
-
-        # Scatter reduce: sum points in each cluster
-        for k in range(K):
-            mask = cluster_assignments == k
-            if cp.any(mask):
-                centroids[k] = cp.sum(A[mask], axis=0)
-                counts[k] = cp.sum(mask)
-
-        # Avoid division by zero
-        mask = counts > 0
-        centroids[mask] /= counts[mask][:, cp.newaxis]
-
-        # Step 3: Check for convergence
-        # if cp.linalg.norm(centroids - old_centroids, ord=2) < tol:
-        #     break
-        centroid_diff = centroids - old_centroids
-        norm = cp.sqrt(cp.sum(centroid_diff ** 2))
-        if norm < tol:
-            break
-
-    return cluster_assignments
-
-# CUPY WITH KERNEL-----------------------------------------------------------
-# custom kernel for assignment and distance calculation
-assign_and_distance_kernel = cp.RawKernel(r'''
-extern "C" __global__
-void assign_and_distance(const float* A, const float* centroids, int* cluster_assignments, float* distances, int N, int D, int K) {
-    int n = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (n < N) {
-        float min_dist = 3.4e+38;
-        int best_k = 0;
-
-        for (int k = 0; k < K; k++) {
-            float dist = 0.0;
-            for (int d = 0; d < D; d++) {
-                float diff = A[n * D + d] - centroids[k * D + d];
-                dist += diff * diff;
-            }
-            if (dist < min_dist) {
-                min_dist = dist;
-                best_k = k;
-            }
-        }
-
-        cluster_assignments[n] = best_k;
-        distances[n] = min_dist;
-    }
-}
-''', 'assign_and_distance')
-
-# custom kernel for centroid updates
-update_centroids_kernel = cp.RawKernel(r'''
-extern "C" __global__
-void update_centroids(const float* A, const int* cluster_assignments, float* centroids, int* counts, int N, int D, int K) {
-    extern __shared__ float shared_mem[];
-    float* shared_centroids = shared_mem;
-    int* shared_counts = (int*)&shared_centroids[K * D];
-
-    int tid = threadIdx.x;
-    int n = blockIdx.x * blockDim.x + threadIdx.x;
-
-    // Initialize shared memory
-    if (tid < K * D) {
-        shared_centroids[tid] = 0.0;
-    }
-    if (tid < K) {
-        shared_counts[tid] = 0;
-    }
-    __syncthreads();
-
-    // Accumulate centroids and counts in shared memory
-    if (n < N) {
-        int k = cluster_assignments[n];
-        for (int d = 0; d < D; d++) {
-            atomicAdd(&shared_centroids[k * D + d], A[n * D + d]);
-        }
-        atomicAdd(&shared_counts[k], 1);
-    }
-    __syncthreads();
-
-    // Write results to global memory
-    if (tid < K * D) {
-        atomicAdd(&centroids[tid], shared_centroids[tid]);
-    }
-    if (tid < K) {
-        atomicAdd(&counts[tid], shared_counts[tid]);
-    }
-}
-''', 'update_centroids')
-
-def kmeans_cupy_kernel(N, D, A, K, max_iters=100, tol=1e-4):
-    if isinstance(A, np.ndarray):
-        A = cp.array(A, dtype=cp.float32)
-
-    # Step 1: Initialize K random points from A as initial centroids
-    indices = cp.random.permutation(N)[:K]
-    centroids = A[indices].copy()
-
-    for _ in range(max_iters):
-        old_centroids = centroids.copy()
-
-        # Step 2a: Assignment Step - Compute distances and assign clusters
-        cluster_assignments = cp.zeros(N, dtype=cp.int32)
-        distances = cp.zeros(N, dtype=cp.float32)
-
-        block_size = 256
-        grid_size = (N + block_size - 1) // block_size
-        assign_and_distance_kernel((grid_size,), (block_size,), (A, centroids, cluster_assignments, distances, N, D, K))
-
-        # Step 2b: Update Step - Compute new centroids
-        centroids = cp.zeros((K, D), dtype=cp.float32)
-        counts = cp.zeros(K, dtype=cp.int32)
-
-        shared_mem_size = (K * D) * cp.dtype(cp.float32).itemsize + K * cp.dtype(cp.int32).itemsize
-        update_centroids_kernel((grid_size,), (block_size,), (A, cluster_assignments, centroids, counts, N, D, K), shared_mem=shared_mem_size)
-
-        # Avoid division by zero
-        mask = counts > 0
-        centroids[mask] /= counts[mask][:, cp.newaxis]
-
-        # Step 3: Check for convergence
-        centroid_diff = centroids - old_centroids
-        norm = cp.sqrt(cp.sum(centroid_diff ** 2))
-        if norm < tol:
-            break
-
-    return cluster_assignments
-
-# TORCH --------------------------------------------------------------------------
+# TORCH ------------------------------------------------------------------------------------------
 def distance_l2(X, Y):
     """
     Compute the pairwise Euclidean distance (L2 distance) between rows of X and Y.
@@ -292,9 +116,7 @@ def kmeans_torch(N, D, A, K, max_iters=100, tol = 1e-4, device="cuda"):
 
     return cluster_assignments
 
-# ROBIN'S CUPY --------------------------------------------------------------------------
-# device = "cuda" if torch.cuda.is_available() else "cpu"
-
+# CUPY -------------------------------------------------------------------------------------------
 l2_closest_kernel = """
 extern "C" __global__
 void closest_index(const float* x, float* y, int* output, const int N, const int M, const int D) {
@@ -372,8 +194,6 @@ def cupy_closest_index(x, y, stream=None):
     shared_mem_size = (threads_per_block * cp.dtype(cp.float32).itemsize +
                        threads_per_block * cp.dtype(cp.int32).itemsize)
     
-    # ADDED ------------------
-    stream = cp.cuda.Stream()
     
     # Launch the kernel in the stream
     closest_kernel(
@@ -386,13 +206,10 @@ def cupy_closest_index(x, y, stream=None):
     
     if stream is not None:
         stream.synchronize()
-    
-    # cp.cuda.Stream.null.synchronize() # ADDED
-    # ------------------------
-    
+        
     return output
 
-def kmeans_robin(N,D,A,K, max_iters=100, tol=1e-4, random_state=None, batch_size=1000):
+def kmeans_cupy(N,D,A,K, max_iters=100, tol=1e-4, random_state=None, batch_size=1000):
     """
     K-Means clustering using CuPy and a custom CUDA kernel for the assignment step.
     
@@ -416,32 +233,26 @@ def kmeans_robin(N,D,A,K, max_iters=100, tol=1e-4, random_state=None, batch_size
         A = cp.asarray(A, dtype=cp.float32) # ASARRAY INSTEAD OF ARRAY TO AVOID COPY (unnecessary data transfer)
 
     # 1. Initialize centroids by randomly selecting K data points from A
-    rng = cp.random.RandomState(seed=random_state)
-    indices = rng.choice(N, size=K, replace=False)
-    centroids = A[indices].copy()  # Initial centroids
-    # indices = cp.random.choice(N, size=K, replace=False)
-    # centroids = A[indices] # initial centroids, AVOID COPY??
+    indices = cp.random.choice(N, size=K, replace=False)
+    centroids = A[indices] # initial centroids, AVOID COPY
     assignments = cp.zeros(N, dtype=cp.int32) # array of zeros of size N for cluster assignments
+
+    # ADDED: Create multiple streams for overlapping computation and data transfers
+    num_streams = 2
+    streams = [cp.cuda.Stream() for _ in range(num_streams)]
 
     # 2. Iterate kmeans until convergence / max_iters 
     for _ in range(max_iters):
         # 2a. Assign each data point in A to nearest centroid
-         # Process data in batches using multiple streams
-        # for i in range(0, N, batch_size):
-        #     stream = streams[i // batch_size % num_streams]  # Cycle through streams
-        #     batch = A[i:i + batch_size]
-        #     assignments[i:i + batch_size] = cupy_closest_index(batch, centroids, stream=stream)
+        # Process data in batches using multiple streams
+        for i in range(0, N, batch_size):
+            stream = streams[i // batch_size % num_streams]  # Cycle through streams
+            batch = A[i:i + batch_size]
+            assignments[i:i + batch_size] = cupy_closest_index(batch, centroids, stream=stream)
 
-        # # Synchronize all streams to ensure all batches are processed
-        # for stream in streams:
-        #     stream.synchronize()
-
-        assignments = cupy_closest_index(A, centroids) # custom kernel
-
-        # ADDED: Process data in batches
-        # for i in range(0, N, batch_size):
-        #     batch = A[i:i + batch_size]
-        #     assignments[i:i + batch_size] = cupy_closest_index(batch, centroids)
+        # Synchronize all streams to ensure all batches are processed
+        for stream in streams:
+            stream.synchronize()
 
         # 2b. Update centroids
         # mask to indicate which point belongs to which cluster
@@ -461,6 +272,82 @@ def kmeans_robin(N,D,A,K, max_iters=100, tol=1e-4, random_state=None, batch_size
 
     return centroids, assignments
 
+# NUMPY BASELINE ---------------------------------------------------------------------------------
+def numpy_closest_index(x, y):
+    """
+    Compute the nearest centroid for each data point using NumPy.
+    
+    Args:
+        x (np.ndarray): Data points of shape (N, D).
+        y (np.ndarray): Centroids of shape (M, D).
+    
+    Returns:
+        output (np.ndarray): Indices of nearest centroids for each data point.
+    """
+    N, D = x.shape
+    M, D_y = y.shape
+    assert D == D_y, "Dimensions of x and y must match"
+
+    # Compute squared Euclidean distances between all data points and centroids
+    distances = np.linalg.norm(x[:, np.newaxis, :] - y[np.newaxis, :, :], axis=2)  # Shape (N, M)
+
+    # Find the index of the nearest centroid for each data point
+    output = np.argmin(distances, axis=1)  # Shape (N,)
+
+    return output
+
+def kmeans_numpy(N, D, A, K, max_iters=100, tol=1e-4, random_state=None):
+    """
+    K-Means clustering using NumPy (CPU implementation).
+    
+    Args:
+        N (int): Number of data points.
+        D (int): Dimension of each data point.
+        A (np.ndarray): Input data of shape (N, D).
+        K (int): Number of clusters.
+        max_iters (int): Maximum number of iterations.
+        tol (float): Tolerance for convergence checking.
+        random_state (int): Seed for random number generation.
+    
+    Returns:
+        centroids (np.ndarray): Final centroids of shape (K, D).
+        assignments (np.ndarray): Indices of closest clusters for each data point.
+    """
+    # Ensure A is a NumPy array
+    if not isinstance(A, np.ndarray):
+        A = np.array(A, dtype=np.float32)
+
+    # Initialize centroids by randomly selecting K data points from A
+    rng = np.random.RandomState(seed=random_state)
+    indices = rng.choice(N, size=K, replace=False)
+    centroids = A[indices].copy()  # Initial centroids
+    assignments = np.zeros(N, dtype=np.int32)  # Array for cluster assignments
+
+    # Iterate until convergence or max_iters is reached
+    for _ in range(max_iters):
+        # Step 1: Assignment Step - Compute distances and assign clusters
+        assignments = numpy_closest_index(A, centroids)
+
+        # Step 2: Update Step - Compute new centroids
+        new_centroids = np.zeros((K, D), dtype=np.float32)
+        counts = np.zeros(K, dtype=np.float32)
+
+        for k in range(K):
+            mask = assignments == k  # Points assigned to cluster k
+            if np.any(mask):
+                new_centroids[k] = np.mean(A[mask], axis=0)  # Mean of points in cluster k
+                counts[k] = np.sum(mask)  # Number of points in cluster k
+
+        # Step 3: Check for convergence
+        centroid_shift = np.linalg.norm(new_centroids - centroids, axis=1).max()
+        if centroid_shift <= tol:
+            break
+
+        # Update centroids for the next iteration
+        centroids = new_centroids
+
+    return centroids, assignments
+
 # ------------------------------------------------------------------------------------------------
 # Test your code here
 # ------------------------------------------------------------------------------------------------
@@ -470,25 +357,14 @@ def test_kmeans_torch(N, D, A, K):
     cpu_result, cpu_time = measure_time(kmeans_torch, "cpu", N, D, A, K)
     gpu_torch_result, gpu_torch_time = measure_time(kmeans_torch, "cuda", N, D, A, K)
 
-    return N, D, "KMeans Torch", cpu_time, gpu_torch_time
+    return N, D, "KMeans Torch CPU vs GPU", cpu_time, gpu_torch_time
 
 def test_kmeans_cupy(N, D, A, K):
-    cpu_result, cpu_time = measure_time(kmeans_torch, "cpu", N, D, A, K)
-    gpu_cupy_result, gpu_cupy_time = measure_time(kmeans_cupy, "cuda", N, D, A, K)
+    # cpu_result, cpu_time = measure_time(kmeans_numpy, "cpu", N, D, A, K)
+    cpu_time, cpu_time = measure_time(kmeans_numpy, "cpu", N, D, A, K)
+    gpu_cupy_robin_result, gpu_cupy_robin_time = measure_time(kmeans_cupy, "cuda", N, D, A, K)
 
-    return N, D, "KMeans CuPy", cpu_time, gpu_cupy_time
-
-def test_kmeans_cupy_kernel(N, D, A, K):
-    cpu_result, cpu_time = measure_time(kmeans_torch, "cpu", N, D, A, K)
-    gpu_cupy_kernel_result, gpu_cupy_kernel_time = measure_time(kmeans_cupy_kernel, "cuda", N, D, A, K)
-
-    return N, D, "KMeans CuPy Kernel", cpu_time, gpu_cupy_kernel_time
-
-def test_kmeans_robin(N, D, A, K):
-    cpu_result, cpu_time = measure_time(kmeans_torch, "cpu", N, D, A, K)
-    gpu_cupy_robin_result, gpu_cupy_robin_time = measure_time(kmeans_robin, "cuda", N, D, A, K)
-
-    return N, D, "Robin's KMeans CuPy", cpu_time, gpu_cupy_robin_time
+    return N, D, "KMeans NumPy vs CuPy", cpu_time, gpu_cupy_robin_time
 
 if __name__ == "__main__":
     np.random.seed(123)
@@ -497,44 +373,11 @@ if __name__ == "__main__":
     results = []
     results.append(test_kmeans_torch(N, D, A, K))
     results.append(test_kmeans_cupy(N, D, A, K))
-    results.append(test_kmeans_cupy_kernel(N, D, A, K))
-    results.append(test_kmeans_robin(N, D, A, K))
-
     print_table(results)
 
-# 12/03:
-#  N       | D        | Function             | CPU Time (s)  | GPU Time (s)  | Speedup 
+
+# Performance
+#  N       | D        | Function                       | CPU Time (s)  | GPU Time (s)  | Speedup 
 # ---------------------------------------------------------------------------------------------------
-# 100000   | 100      | KMeans Torch         | 0.444396      | 0.406674      | 1.09x
-# 100000   | 100      | KMeans CuPy          | 0.405463      | 5.590575      | 0.07x
-# 100000   | 100      | KMeans CuPy Kernel   | 0.407877      | 2.777226      | 0.15x
-
-#  N       | D        | Function             | CPU Time (s)  | GPU Time (s)  | Speedup 
-# ---------------------------------------------------------------------------------------------------
-# 10000    | 2        | KMeans Torch         | 0.122799      | 0.057809      | 2.12x
-# 10000    | 2        | KMeans CuPy          | 0.047961      | 1.104833      | 0.04x
-# 10000    | 2        | KMeans CuPy Kernel   | 0.084559      | 0.127401      | 0.66x
-
-#  N       | D        | Function             | CPU Time (s)  | GPU Time (s)  | Speedup 
-# ---------------------------------------------------------------------------------------------------
-# 10000    | 1024     | KMeans Torch         | 0.156841      | 0.116008      | 1.35x
-# 10000    | 1024     | KMeans CuPy          | 0.135100      | 1.599215      | 0.08x
-# 10000    | 1024     | KMeans CuPy Kernel   | 0.163891      | 1.442933      | 0.11x
-
-
-# 17/03, comparing with Robins' implementation:
-#  N       | D        | Function             | CPU Time (s)  | GPU Time (s)  | Speedup 
-# ---------------------------------------------------------------------------------------------------
-# 10000    | 1024     | KMeans Torch         | 0.144101      | 0.149827      | 0.96x
-# 10000    | 1024     | KMeans CuPy          | 0.136258      | 2.193279      | 0.06x
-# 10000    | 1024     | KMeans CuPy Kernel   | 0.176850      | 1.136948      | 0.16x
-# 10000    | 1024     | Robin's KMeans CuPy  | 0.127600      | 0.674208      | 0.19x
-
-# 17/03, impovements:
-#  N       | D        | Function             | CPU Time (s)  | GPU Time (s)  | Speedup 
-# ---------------------------------------------------------------------------------------------------
-# 10000    | 1024     | KMeans Torch         | 0.146114      | 0.140935      | 1.04x
-# 10000    | 1024     | KMeans CuPy          | 0.146577      | 2.002759      | 0.07x
-# 10000    | 1024     | KMeans CuPy Kernel   | 0.178204      | 1.091706      | 0.16x
-# 10000    | 1024     | Robin's KMeans CuPy  | 0.130378      | 0.486801      | 0.27x
-
+# 10000    | 1024     | KMeans Torch CPU vs GPU        | 0.138115      | 0.147309      | 0.94x
+# 10000    | 1024     | KMeans NumPy vs CuPy           | 47.247719      | 0.628899      | 75.13x
