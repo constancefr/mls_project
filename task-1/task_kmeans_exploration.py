@@ -16,18 +16,40 @@ def warm_up_gpu():
     cp.cuda.Stream.null.synchronize()  # Synchronize to ensure the operation completes
 
 def measure_time(func, device, *args):
-    # Ensure tensors are on the correct device
-    torch.cuda.synchronize() if device == "cuda" else None  
+    """
+    Measure the execution time of a function, handling both PyTorch and CuPy functions.
+    
+    Args:
+        func (callable): The function to measure (PyTorch or CuPy).
+        device (str): The device to use ("cpu" or "cuda").
+        *args: Arguments to pass to the function.
+    
+    Returns:
+        result: The result of the function.
+        elapsed_time (float): The execution time in seconds.
+    """
 
     if device == "cuda":
         warm_up_gpu()
+        # if "torch" in func.__module__:  # Check if the function is from PyTorch
+        #     torch.cuda.synchronize()  # Synchronize PyTorch's CUDA operations
+        # elif "cupy" in func.__module__:  # Check if the function is from CuPy
+        #     cp.cuda.Stream.null.synchronize()  # Synchronize CuPy's CUDA operations
 
-    start_time = time.time()  # Start the timer
-    result = func(*args)  # Run the function
-    torch.cuda.synchronize() if device == "cuda" else None  
+    start_time = time.time()
 
-    end_time = time.time()  # End the timer
+    result = func(*args) # run function
+
+    # Synchronize again after the function call
+    # if device == "cuda":
+    #     if "torch" in func.__module__:
+    #         torch.cuda.synchronize()
+    #     elif "cupy" in func.__module__:
+    #         cp.cuda.Stream.null.synchronize()
+
+    end_time = time.time()
     elapsed_time = end_time - start_time
+
     return result, elapsed_time
 
 def print_table(results):
@@ -360,11 +382,10 @@ def test_kmeans_torch(N, D, A, K):
     return N, D, "KMeans Torch CPU vs GPU", cpu_time, gpu_torch_time
 
 def test_kmeans_cupy(N, D, A, K):
-    # cpu_result, cpu_time = measure_time(kmeans_numpy, "cpu", N, D, A, K)
-    cpu_time, cpu_time = measure_time(kmeans_numpy, "cpu", N, D, A, K)
-    gpu_cupy_robin_result, gpu_cupy_robin_time = measure_time(kmeans_cupy, "cuda", N, D, A, K)
+    cpu_result, cpu_time = measure_time(kmeans_numpy, "cpu", N, D, A, K)
+    gpu_cupy_result, gpu_cupy_time = measure_time(kmeans_cupy, "cuda", N, D, A, K)
 
-    return N, D, "KMeans NumPy vs CuPy", cpu_time, gpu_cupy_robin_time
+    return N, D, "KMeans NumPy vs CuPy", cpu_time, gpu_cupy_time
 
 if __name__ == "__main__":
     np.random.seed(123)
