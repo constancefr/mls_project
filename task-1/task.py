@@ -1,10 +1,11 @@
+import os
 import torch
 import cupy as cp
 # import triton
 import numpy as np
 import time
 import json
-from test import testdata_kmeans, testdata_knn, testdata_ann
+from test import testdata_kmeans_dynam, testdata_knn, testdata_ann
 
 # ------------------------------------------------------------------------------------------------
 # HELPERS
@@ -15,7 +16,7 @@ def warm_up_gpu():
     warm_up_data += 1  # Perform a simple operation
     cp.cuda.Stream.null.synchronize()  # Synchronize to ensure the operation completes
 
-def measure_time(func, device, *args):
+def measure_time(func, device, *args, **kwargs):
     if device == "cuda":
         warm_up_gpu()
         if "torch" in func.__module__:
@@ -25,7 +26,7 @@ def measure_time(func, device, *args):
 
     start_time = time.time()
 
-    result = func(*args) # run function
+    result = func(*args, **kwargs) # run function
 
     if device == "cuda":
         if "torch" in func.__module__:
@@ -37,6 +38,7 @@ def measure_time(func, device, *args):
     elapsed_time = end_time - start_time
 
     return result, elapsed_time
+
 
 def print_table(results):
     print("Benchmark - CPU vs GPU Performance")
@@ -55,9 +57,9 @@ def print_table(results):
 # def distance_kernel(X, Y, D):
 #     pass
 
-def distance_cosine(X, Y):
+def distance_cosine_torch(X, Y):
     """
-    Compute the pairwise cosine distance between rows of X and Y.
+    Computes the pairwise cosine distance between rows of X and Y.
     
     Args:
         X (torch.Tensor): Tensor of shape (m, d)
@@ -71,6 +73,38 @@ def distance_cosine(X, Y):
     
     cosine_similarity = torch.mm(X_norm, Y_norm.T)  
     cosine_distance = 1 - cosine_similarity
+    
+    return cosine_distance
+
+def distance_cosine(X, Y):
+    """
+    CuPy implementation.
+    Computes the pairwise cosine distance between rows of X and Y.
+    
+    Args:
+        X (cp.ndarray): Array of shape (m, d)
+        Y (cp.ndarray): Array of shape (n, d)
+    
+    Returns:
+        cp.ndarray: Cosine distance matrix of shape (m, n)
+    """
+    # Normalize X and Y along the feature dimension (axis=1)
+    X_norm = cp.linalg.norm(X, axis=1, keepdims=True)  # Shape: (m, 1)
+    Y_norm = cp.linalg.norm(Y, axis=1, keepdims=True)  # Shape: (n, 1)
+    
+    # Avoid division by zero
+    X_norm[X_norm == 0] = 1
+    Y_norm[Y_norm == 0] = 1
+    
+    # Normalize the rows of X and Y
+    X_normalized = X / X_norm  # Shape: (m, d)
+    Y_normalized = Y / Y_norm  # Shape: (n, d)
+    
+    # Compute cosine similarity
+    cosine_similarity = cp.dot(X_normalized, Y_normalized.T)  # Shape: (m, n)
+    
+    # Compute cosine distance
+    cosine_distance = 1 - cosine_similarity  # Shape: (m, n)
     
     return cosine_distance
 
@@ -229,10 +263,38 @@ def kmeans_torch(N, D, A, K, max_iters=100, tol = 1e-4, device="cuda"):
 
     return cluster_assignments
 
-# CUPY -------------------------------------------------------------------------------------------
+# CUPY DESIGN 1 ----------------------------------------------------------------------------------
+def kmeans_cupy_1(N, D, A, K, max_iters=100, tol=1e-4):
+     # Convert input data to CuPy arrays
+     A = cp.asarray(A, dtype=cp.float32)
+     
+     # Step 1: Initialize K random centroids
+     indices = cp.random.choice(N, K, replace=False)
+     centroids = A[indices].copy()
+     
+     for _ in range(max_iters):
+         # Step 2a: Compute distances and assign clusters
+         distances = cp.linalg.norm(A[:, cp.newaxis] - centroids, axis=2)  # Shape: (N, K)
+         cluster_assignments = cp.argmin(distances, axis=1)  # Shape: (N,)
+         
+         # Step 2b: Update centroids using advanced indexing and reduction
+         new_centroids = cp.zeros((K, D), dtype=cp.float32)
+         for k in range(K):
+             mask = cluster_assignments == k
+             if cp.any(mask):
+                 new_centroids[k] = cp.mean(A[mask], axis=0)
+         
+         # Step 3: Check for convergence
+         if cp.linalg.norm(new_centroids - centroids) < tol:
+             break
+         centroids = new_centroids
+     
+     return cluster_assignments.get()
+
+# CUPY DESIGN 2 ----------------------------------------------------------------------------------
 l2_closest_kernel = """
 extern "C" __global__
-void closest_index(const float* x, float* y, int* output, const int N, const int M, const int D) {
+void closest_index_l2(const float* x, float* y, int* output, const int N, const int M, const int D) {
     extern __shared__ char shared_mem[];
     float* shared_dist = (float*)shared_mem;
     int* shared_idx = (int*)(shared_dist + blockDim.x);
@@ -281,9 +343,73 @@ void closest_index(const float* x, float* y, int* output, const int N, const int
 }
 """
 
-closest_kernel = cp.RawKernel(l2_closest_kernel, "closest_index")
+cosine_closest_kernel = """
+extern "C" __global__
+void closest_index_cosine(const float* x, float* y, int* output, const int N, const int M, const int D) {
+    extern __shared__ char shared_mem[];
+    float* shared_dist = (float*)shared_mem;
+    int* shared_idx = (int*)(shared_dist + blockDim.x);
 
-def cupy_closest_index(x, y, stream=None):
+    int tid = threadIdx.x;
+    int i = blockIdx.x;  // Each block handles one vector x[i]
+    int num_threads = blockDim.x;
+
+    float max_sim = -99999999.0;  // Cosine similarity ranges from -1 to 1
+    int max_index = -1;
+
+    // Grid-stride loop over M y vectors
+    for (int j = tid; j < M; j += num_threads) {
+        float dot_product = 0.0f;
+        float norm_x = 0.0f;
+        float norm_y = 0.0f;
+
+        // Compute dot product and norms
+        for (int k = 0; k < D; ++k) {
+            dot_product += x[i * D + k] * y[j * D + k];
+            norm_x += x[i * D + k] * x[i * D + k];
+            norm_y += y[j * D + k] * y[j * D + k];
+        }
+
+        // Normalize dot product to get cosine similarity
+        float cosine_sim = dot_product / (sqrtf(norm_x) * sqrtf(norm_y));
+
+        // Convert similarity to distance (1 - similarity)
+        float cosine_dist = 1.0f - cosine_sim;
+
+        // Find the minimum distance
+        if (cosine_dist < max_sim) {
+            max_sim = cosine_dist;
+            max_index = j;
+        }
+    }
+
+    // Store local min into shared memory
+    shared_dist[tid] = max_sim;
+    shared_idx[tid] = max_index;
+    __syncthreads();
+
+    // Parallel reduction to find the global min
+    for (int s = num_threads / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            if (shared_dist[tid + s] < shared_dist[tid]) {
+                shared_dist[tid] = shared_dist[tid + s];
+                shared_idx[tid] = shared_idx[tid + s];
+            }
+        }
+        __syncthreads();
+    }
+
+    // Write the result
+    if (tid == 0) {
+        output[i] = shared_idx[0];
+    }
+}
+"""
+
+l2_kernel = cp.RawKernel(l2_closest_kernel, "closest_index_l2")
+cosine_kernel = cp.RawKernel(cosine_closest_kernel, "closest_index_cosine")
+
+def cupy_closest_index(x, y, distance_metric="l2", stream=None):
     '''
     Compute the nearest centroid for each data point using a custom CUDA kernel.
     
@@ -307,9 +433,16 @@ def cupy_closest_index(x, y, stream=None):
     shared_mem_size = (threads_per_block * cp.dtype(cp.float32).itemsize +
                        threads_per_block * cp.dtype(cp.int32).itemsize)
     
+    # choose kernel
+    if distance_metric == "l2":
+        kernel = l2_kernel
+    elif distance_metric == "cosine":
+        kernel = cosine_kernel
+    else:
+        raise ValueError("Unsupported distance metric. Use 'l2' or 'cosine'.")
     
     # Launch the kernel in the stream
-    closest_kernel(
+    kernel(
         (blocks_per_grid,),
         (threads_per_block,),
         (x, y, output, N, M, D),
@@ -322,7 +455,7 @@ def cupy_closest_index(x, y, stream=None):
         
     return output
 
-def our_kmeans(N,D,A,K, max_iters=100, tol=1e-4, random_state=None, batch_size=1000):
+def kmeans_cupy_2(N,D,A,K, max_iters=100, tol=1e-4, random_state=None, batch_size=1000, distance_metric="l2"):
     """
     K-Means clustering using CuPy and a custom CUDA kernel for the assignment step.
     
@@ -335,6 +468,7 @@ def our_kmeans(N,D,A,K, max_iters=100, tol=1e-4, random_state=None, batch_size=1
         tol (float): Tolerance for convergence checking.
         random_state (int): Seed for random number generation.
         batch_size (int): Size of batches for processing data in chunks.
+        distance_metric (str): Distance metric to use ("l2" or "cosine").
     
     Returns:
         centroids (cupy.ndarray): Final centroids of shape (n_clusters, D).
@@ -357,11 +491,10 @@ def our_kmeans(N,D,A,K, max_iters=100, tol=1e-4, random_state=None, batch_size=1
     # 2. Iterate kmeans until convergence / max_iters 
     for _ in range(max_iters):
         # 2a. Assign each data point in A to nearest centroid
-        # Process data in batches using multiple streams
-        for i in range(0, N, batch_size):
+        for i in range(0, N, batch_size): # process data in batches using multiple streams
             stream = streams[i // batch_size % num_streams]  # Cycle through streams
             batch = A[i:i + batch_size]
-            assignments[i:i + batch_size] = cupy_closest_index(batch, centroids, stream=stream)
+            assignments[i:i + batch_size] = cupy_closest_index(batch, centroids, distance_metric=distance_metric, stream=stream)
 
         # Synchronize all streams to ensure all batches are processed
         for stream in streams:
@@ -461,7 +594,6 @@ def kmeans_numpy(N, D, A, K, max_iters=100, tol=1e-4, random_state=None):
 
     return centroids, assignments
 
-
 # ------------------------------------------------------------------------------------------------
 # Your Task 2.2 code here
 # ------------------------------------------------------------------------------------------------
@@ -533,20 +665,34 @@ def our_ann(N, D, A, X, K, K1=5, K2=10, device="cuda"):
 # Test your code here
 # ------------------------------------------------------------------------------------------------
 
-def test_kmeans_torch():
-    N, D, A, K = testdata_kmeans("")
+def test_kmeans_torch(N, D, A, K):
+    # N, D, A, K = testdata_kmeans("")
     measure_time(kmeans_torch, "cpu", N, D, A, 1) # warmup
     cpu_result, cpu_time = measure_time(kmeans_torch, "cpu", N, D, A, K)
     gpu_torch_result, gpu_torch_time = measure_time(kmeans_torch, "cuda", N, D, A, K)
 
     return N, D, "KMeans Torch CPU vs GPU", cpu_time, gpu_torch_time
 
-def test_kmeans_cupy():
-    N, D, A, K = testdata_kmeans("")
+def test_kmeans_cupy_1(N, D, A, K):
+    # N, D, A, K = testdata_kmeans("")
     cpu_result, cpu_time = measure_time(kmeans_numpy, "cpu", N, D, A, K)
-    gpu_cupy_result, gpu_cupy_time = measure_time(our_kmeans, "cuda", N, D, A, K)
+    gpu_cupy_result, gpu_cupy_time = measure_time(kmeans_cupy_1, "cuda", N, D, A, K)
 
-    return N, D, "KMeans NumPy vs CuPy", cpu_time, gpu_cupy_time
+    return N, D, "KMeans CuPy 1", cpu_time, gpu_cupy_time
+
+def test_kmeans_cupy_2(N, D, A, K):
+    # N, D, A, K = testdata_kmeans("")
+    cpu_result, cpu_time = measure_time(kmeans_numpy, "cpu", N, D, A, K)
+    gpu_cupy_result, gpu_cupy_time = measure_time(kmeans_cupy_2, "cuda", N, D, A, K)
+
+    return N, D, "KMeans CuPy 2", cpu_time, gpu_cupy_time
+
+def test_kmeans_l2_cosine(N, D, A, K):
+    # Compares performance of kmeans_cupy_1 with l2 vs. cosine distance kernels
+    l2_cupy_result, l2_cupy_time = measure_time(kmeans_cupy_2, "cuda", N, D, A, K, distance_metric="l2")
+    cosine_cupy_result, cosine_cupy_time = measure_time(kmeans_cupy_2, "cuda", N, D, A, K, distance_metric="cosine")
+
+    return N, D, "KMeans l2 vs. cosine", l2_cupy_time, cosine_cupy_time
 
 def test_knn():
     N, D, A, X, K = testdata_knn("")
@@ -583,16 +729,77 @@ def recall_rate(list1, list2):
     """
     return len(set(list1) & set(list2)) / len(list1)
 
+def create_or_load_memmap(filename, shape, dtype):
+    """
+    Create or load a memory-mapped file. If the file already exists, load it in read-only mode.
+    If it doesn't exist, create it and fill it with random data.
+
+    Args:
+        filename (str): Path to the memory-mapped file.
+        shape (tuple): Shape of the array (N, D).
+        dtype (np.dtype): Data type of the array.
+
+    Returns:
+        np.memmap: The memory-mapped array.
+    """
+    if os.path.exists(filename):
+        # Load the existing file in read-only mode
+        print(f"Loading existing memory-mapped file: {filename}")
+        return np.memmap(filename, dtype=dtype, mode='r', shape=shape)
+    else:
+        # Create a new memory-mapped file and fill it with random data
+        print(f"Creating new memory-mapped file: {filename}")
+        large_A = np.memmap(filename, dtype=dtype, mode='w+', shape=shape)
+        large_A[:] = np.random.rand(*shape).astype(dtype)
+        large_A.flush()  # Ensure data is written to disk
+        return large_A
 
 if __name__ == "__main__":
     np.random.seed(123)
 
+    # Test cases for smaller datasets
+    test_cases = [
+        [1000, 2, 10],
+        [1000, 1024, 10],
+        [4000000, 2, 10],
+        [1000, 65536, 10]
+    ]
+
     results = []
-    results.append(test_kmeans_torch())
-    results.append(test_kmeans_cupy())
-    results.append(test_knn())
-    results.append(test_ann())
+    for i in range(len(test_cases)):
+        N = test_cases[i][0]
+        D = test_cases[i][1]
+        A = testdata_kmeans_dynam(N, D)
+        K = test_cases[i][2]
+        
+        results.append(test_kmeans_torch(N, D, A, K))
+        results.append(test_kmeans_cupy_1(N, D, A, K))
+        results.append(test_kmeans_cupy_2(N, D, A, K))
+        results.append(test_kmeans_l2_cosine(N, D, A, K))
+        # results.append(test_knn())
+        # results.append(test_ann())
+
+    # Handle the large dataset using a memory-mapped file
+    # filename = 'large_data.dat'
+    # shape = (4000000, 65536)
+    # dtype = np.float32
+
+    # try:
+    #     large_A = create_or_load_memmap(filename, shape, dtype)
+    #     N_large, D_large = large_A.shape
+    #     K = 10
+
+    #     results.append(test_kmeans_torch(N_large, D_large, large_A, K))
+    #     results.append(test_kmeans_cupy_1(N_large, D_large, large_A, K))
+    #     results.append(test_kmeans_cupy_2(N_large, D_large, large_A, K))
+    #     # results.append(test_knn())
+    #     # results.append(test_ann())
+    # except Exception as e:
+    #     print(f"Error handling memory-mapped file: {e}")
+
+    # Print the results
     print_table(results)
+
 
 # KMeans performance
 #  N       | D        | Function                       | CPU Time (s)  | GPU Time (s)  | Speedup 

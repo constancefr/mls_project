@@ -31,6 +31,11 @@ def testdata_kmeans(test_file):
             A = np.loadtxt(A_file)
         return N, D, A, K
 
+def testdata_kmeans_dynam(N, D):
+    # use random data
+    A = np.random.randn(N, D)
+    return A
+    
 def testdata_knn(test_file):
     if test_file == "":
         # use random data

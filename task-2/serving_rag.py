@@ -15,12 +15,12 @@ documents = [
 ]
 
 # 1. Load embedding model
-EMBED_MODEL_NAME = "intfloat/multilingual-e5-large-instruct"
-embed_tokenizer = AutoTokenizer.from_pretrained(EMBED_MODEL_NAME)
-embed_model = AutoModel.from_pretrained(EMBED_MODEL_NAME)
+EMBED_MODEL_NAME = "intfloat/multilingual-e5-large-instruct" # pre-trained embedding model from Hugging Face
+embed_tokenizer = AutoTokenizer.from_pretrained(EMBED_MODEL_NAME) # converts text into tokens
+embed_model = AutoModel.from_pretrained(EMBED_MODEL_NAME) # computes embeddings for text
 
 # Basic Chat LLM
-chat_pipeline = pipeline("text-generation", model="Qwen/Qwen2.5-1.5B-Instruct")
+chat_pipeline = pipeline("text-generation", model="Qwen/Qwen2.5-1.5B-Instruct") # will generate responses based on query and retrieved documents
 
 
 ## Hints:
@@ -35,23 +35,42 @@ chat_pipeline = pipeline("text-generation", model="Qwen/Qwen2.5-1.5B-Instruct")
 # 2. Process the batched requests
 
 def get_embedding(text: str) -> np.ndarray:
-    """Compute a simple average-pool embedding."""
-    inputs = embed_tokenizer(text, return_tensors="pt", truncation=True)
+    """
+    Computes a simple average-pool embedding.
+
+    Input: a text string.
+    Ourput: a NumPy array representing the embedding of the text.
+    """
+    inputs = embed_tokenizer(text, return_tensors="pt", truncation=True) # tokenize text
+
+    # Pass tokenized input through embedding model to get hidden states,
+    # compute the avg of the hidden states along the sequence dimension.
     with torch.no_grad():
         outputs = embed_model(**inputs)
-    return outputs.last_hidden_state.mean(dim=1).cpu().numpy()
+
+    return outputs.last_hidden_state.mean(dim=1).cpu().numpy() # move to CPU, convert to NumPy
 
 # Precompute document embeddings
-doc_embeddings = np.vstack([get_embedding(doc) for doc in documents])
+doc_embeddings = np.vstack([get_embedding(doc) for doc in documents]) # np.vstack to stack embeddings vertically into single array
 
 ### You may want to use your own top-k retrieval method (task 1)
 def retrieve_top_k(query_emb: np.ndarray, k: int = 2) -> list:
-    """Retrieve top-k docs via dot-product similarity."""
-    sims = doc_embeddings @ query_emb.T
+    """
+    Retrieve top-k docs via dot-product similarity.
+    
+    Input: query embedding, number of documents to retrieve.
+    Output: list of the top-k most relevant documents.
+    """
+    sims = doc_embeddings @ query_emb.T # dot-prod similarity
     top_k_indices = np.argsort(sims.ravel())[::-1][:k]
+
     return [documents[i] for i in top_k_indices]
 
 def rag_pipeline(query: str, k: int = 2) -> str:
+    '''
+    Input: user query, number of docs to retrieve.
+    Output: generated response from the LLM.
+    '''
     # Step 1: Input embedding
     query_emb = get_embedding(query)
     
@@ -66,13 +85,18 @@ def rag_pipeline(query: str, k: int = 2) -> str:
     generated = chat_pipeline(prompt, max_length=50, do_sample=True)[0]["generated_text"]
     return generated
 
-# Define request model
+# Define request model using Pydantic
 class QueryRequest(BaseModel):
     query: str
     k: int = 2
 
+# Define API endpoint
 @app.post("/rag")
 def predict(payload: QueryRequest):
+    '''
+    Input: JSON payload containing query & k (see QueryRequest class).
+    Output: JSON response containing original query & generated result.
+    '''
     result = rag_pipeline(payload.query, payload.k)
     
     return {
