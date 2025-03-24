@@ -14,14 +14,14 @@ documents = [
     "Hummingbirds can hover in mid-air by rapidly flapping their wings."
 ]
 
-# 1. Load embedding model
-EMBED_MODEL_NAME = "intfloat/multilingual-e5-large-instruct" # pre-trained embedding model from Hugging Face
-embed_tokenizer = AutoTokenizer.from_pretrained(EMBED_MODEL_NAME) # converts text into tokens
-embed_model = AutoModel.from_pretrained(EMBED_MODEL_NAME) # computes embeddings for text
+# 1. Load embedding model (pre downloaded)
+EMBED_MODEL_PATH = "/home/s2666210/models/multilingual-e5-large-instruct" # pre-trained embedding model from Hugging Face
+embed_tokenizer = AutoTokenizer.from_pretrained(EMBED_MODEL_PATH) # converts text into tokens
+embed_model = AutoModel.from_pretrained(EMBED_MODEL_PATH) # computes embeddings for text
 
 # Basic Chat LLM
-chat_pipeline = pipeline("text-generation", model="Qwen/Qwen2.5-1.5B-Instruct") # will generate responses based on query and retrieved documents
-
+CHAT_MODEL_PATH = "/home/s2666210/models/opt-125m"
+chat_pipeline = pipeline("text-generation", model=CHAT_MODEL_PATH) # will generate responses based on query and retrieved documents
 
 ## Hints:
 
