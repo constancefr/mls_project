@@ -1,14 +1,19 @@
+import os
 import requests
 import time
-# import threading
 import random
+import argparse
 from concurrent.futures import ThreadPoolExecutor
-import matplotlib.pyplot as plt
 import numpy as np
+import matplotlib.pyplot as plt
 from datetime import datetime
 
+FIGURES_DIR = "./figures"
+os.makedirs(FIGURES_DIR, exist_ok=True)
+
 # Configuration
-SERVICE_URL = "http://192.168.16.21:8000/rag"
+DEFAULT_PORT_ORIGINAL = 8000
+DEFAULT_PORT_ENHANCED = 8001
 QUERIES = [
     "Tell me about cats",
     "What are dogs like?",
@@ -18,35 +23,52 @@ QUERIES = [
 ]
 TEST_DURATION = 30  # seconds for each rate test
 REQUEST_RATES = [1, 2, 5, 10, 20]  # requests per second to test
+# REQUEST_RATES = [1]  # requests per second to test
 MAX_WORKERS = 50  # maximum concurrent threads
 
-# Statistics tracking
-results = {
-    'rates': [],
-    'throughput': [],
-    'latency_avg': [],
-    'latency_p95': [],
-    'success_rate': []
-}
+def parse_args():
+    parser = argparse.ArgumentParser(description='Test RAG service performance')
+    parser.add_argument('--service', choices=['original', 'enhanced'], required=True,
+                       help='Which service to test (original or enhanced)')
+    parser.add_argument('--host', default='192.168.16.27',
+                       help='Host address of the service')
+    parser.add_argument('--port', type=int,
+                       help='Custom port number (overrides default)')
+    return parser.parse_args()
 
-def send_request():
+def initialize_results():
+    return {
+        'rates': [],
+        'throughput': [],
+        'latency_avg': [],
+        'latency_p95': [],
+        'success_rate': []
+    }
+
+def send_request(service_url):
     """Send a single request to the RAG service"""
     query = random.choice(QUERIES)
     payload = {"query": query, "k": 2}
     
     start_time = time.time()
     try:
-        response = requests.post(SERVICE_URL, json=payload, timeout=10)
+        response = requests.post(service_url, json=payload, timeout=20)
         latency = time.time() - start_time
         
+        # Check for both status code and proper response structure
         if response.status_code == 200:
-            return latency, True
-        else:
-            return latency, False
+            json_response = response.json()
+            # Success conditions for both services:
+            # Original service returns {'query':..., 'result':...}
+            # Enhanced service returns {'query':..., 'result':..., 'latency':...}
+            if 'result' in json_response:
+                return latency, True
+        return latency, False
     except Exception as e:
+        print(f"Request failed: {str(e)}")
         return time.time() - start_time, False
 
-def run_test(rate):
+def run_test(rate, service_url, results):
     """Run a test at a specific request rate"""
     print(f"\nStarting test at {rate} requests/sec...")
     
@@ -70,14 +92,11 @@ def run_test(rate):
         while time.time() < end_time:
             request_time = time.time()
             
-            # Submit request
-            future = executor.submit(send_request)
+            future = executor.submit(send_request, service_url)
             future.add_done_callback(handle_result)
             
-            # Sleep to maintain rate
             elapsed = time.time() - request_time
-            sleep_time = max(0, request_interval - elapsed)
-            time.sleep(sleep_time)
+            time.sleep(max(0, request_interval - elapsed))
     
     # Calculate statistics
     actual_duration = time.time() - start_time
@@ -85,11 +104,10 @@ def run_test(rate):
     success_rate = (successful_requests / total_requests) * 100 if total_requests > 0 else 0
     
     if latencies:
-        avg_latency = sum(latencies) / len(latencies)
+        avg_latency = np.mean(latencies)
         p95_latency = np.percentile(latencies, 95)
     else:
-        avg_latency = 0
-        p95_latency = 0
+        avg_latency = p95_latency = 0
     
     print(f"Test completed at target rate {rate} req/sec")
     print(f"  Actual rate: {actual_rate:.2f} req/sec")
@@ -104,7 +122,7 @@ def run_test(rate):
     results['latency_p95'].append(p95_latency)
     results['success_rate'].append(success_rate)
 
-def plot_results():
+def plot_results(results, service_type):
     """Plot the test results"""
     plt.figure(figsize=(15, 10))
     
@@ -133,19 +151,36 @@ def plot_results():
     
     plt.tight_layout()
     
-    # Save plot with timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    plt.savefig(f"rag_service_test_{timestamp}.png")
-    print(f"\nResults plot saved as rag_service_test_{timestamp}.png")
+    filename = os.path.join(FIGURES_DIR, f"{service_type}_service_test_{timestamp}.png")
+    
+    try:
+        plt.savefig(filename, dpi=300, bbox_inches='tight')
+        print(f"\nResults plot saved to {filename}")
+    except Exception as e:
+        print(f"\nError saving plot: {str(e)}")
+        # Fallback to current directory if figures/ fails
+        fallback_filename = f"{service_type}_service_test_{timestamp}.png"
+        plt.savefig(fallback_filename)
+        print(f"Saved plot to current directory as {fallback_filename}")
+
+def main():
+    args = parse_args()
+    
+    # Set default port if not specified
+    if args.port is None:
+        args.port = DEFAULT_PORT_ENHANCED if args.service == 'enhanced' else DEFAULT_PORT_ORIGINAL
+    
+    service_url = f"http://{args.host}:{args.port}/rag"
+    print(f"Testing {args.service} service at {service_url}")
+    
+    results = initialize_results()
+    
+    for rate in REQUEST_RATES:
+        run_test(rate, service_url, results)
+    
+    plot_results(results, args.service)
+    print("\nLoad testing completed!")
 
 if __name__ == "__main__":
-    print("Starting RAG service load testing...")
-    
-    # Run tests for each rate
-    for rate in REQUEST_RATES:
-        run_test(rate)
-    
-    # Plot results
-    plot_results()
-    
-    print("\nLoad testing completed!")
+    main()

@@ -73,14 +73,14 @@ def rag_pipeline(query: str, k: int = 2) -> str:
     '''
     # Step 1: Input embedding
     query_emb = get_embedding(query)
-    
+
     # Step 2: Retrieval
     retrieved_docs = retrieve_top_k(query_emb, k)
-    
+
     # Construct the prompt from query + retrieved docs
     context = "\n".join(retrieved_docs)
     prompt = f"Question: {query}\nContext:\n{context}\nAnswer:"
-    
+
     # Step 3: LLM Output
     generated = chat_pipeline(prompt, max_length=50, do_sample=True)[0]["generated_text"]
     return generated
@@ -98,7 +98,7 @@ def predict(payload: QueryRequest):
     Output: JSON response containing original query & generated result.
     '''
     result = rag_pipeline(payload.query, payload.k)
-    
+
     return {
         "query": payload.query,
         "result": result,
