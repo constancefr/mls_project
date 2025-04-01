@@ -1,0 +1,45 @@
+Testing enhanced service at http://192.168.16.27:8001/rag
+
+Starting test at 1 requests/sec...
+Test completed at target rate 1 req/sec
+  Actual rate: 1.00 req/sec
+  Success rate: 100.00%
+  Avg latency: 1.489 sec
+  95th percentile latency: 2.861 sec
+
+Starting test at 2 requests/sec...
+Test completed at target rate 2 req/sec
+  Actual rate: 1.85 req/sec
+  Success rate: 100.00%
+  Avg latency: 2.891 sec
+  95th percentile latency: 4.428 sec
+
+Starting test at 5 requests/sec...
+Test completed at target rate 5 req/sec
+  Actual rate: 3.34 req/sec
+  Success rate: 100.00%
+  Avg latency: 8.871 sec
+  95th percentile latency: 14.472 sec
+
+Starting test at 10 requests/sec...
+Test completed at target rate 10 req/sec
+  Actual rate: 3.37 req/sec
+  Success rate: 100.00%
+  Avg latency: 13.147 sec
+  95th percentile latency: 16.385 sec
+
+Starting test at 20 requests/sec...
+Test completed at target rate 20 req/sec
+  Actual rate: 3.40 req/sec
+  Success rate: 100.00%
+  Avg latency: 13.993 sec
+  95th percentile latency: 16.497 sec
+
+Results plot saved as enhanced_service_test_20250324_215318.png
+
+Load testing completed!
+
+------------------------------------------------------------------------
+
+
+
