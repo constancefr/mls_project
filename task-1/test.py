@@ -36,8 +36,8 @@ def testdata_kmeans(test_file):
 def testdata_knn(test_file):
     if test_file == "":
         # use random data
-        N = 1000
-        D = 100
+        N = 4000
+        D = 2**15
         A = np.random.randn(N, D)
         X = np.random.randn(D)
         K = 10
@@ -51,8 +51,10 @@ def testdata_knn(test_file):
             A_file = data["a_file"]
             X_file = data["x_file"]
             K = data["k"]
-            A = np.loadtxt(A_file)
-            X = np.loadtxt(X_file)
+            #A = np.loadtxt(A_file)
+            #X = np.loadtxt(X_file)
+            X = np.memmap(X_file, dtype=np.float32, mode='r', shape=(D,))
+            A = np.memmap(A_file, dtype=np.float32, mode='r', shape=(N, D))
         return N, D, A, X, K
     
 def testdata_ann(test_file):

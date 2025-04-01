@@ -1,388 +1,931 @@
 import torch
+import cupy as cp
+import triton
 import numpy as np
 import time
 import json
+import sys
 from test import testdata_kmeans, testdata_knn, testdata_ann
-import cupy as cp
 
 # ------------------------------------------------------------------------------------------------
-# Your Task 1.1 code here
+# L2
 # ------------------------------------------------------------------------------------------------
-def distance_cosine(X, Y):
 
-    X_norm = torch.nn.functional.normalize(X, p=2, dim=1) 
-    Y_norm = torch.nn.functional.normalize(Y, p=2, dim=1)
-    cosine_similarity = torch.mm(X_norm, Y_norm.T)  
-    cosine_distance = 1 - cosine_similarity
+# CPU version of L2 distance
+def distance_l2_cpu(X, Y):
+    # Start timer to measure execution time
+    start_time = time.time()
+
+    # Calculate the L2 distance between vectors X and Y by computing the sum of squared differences, then taking the square root
+    dist = np.sqrt(np.sum((X - Y) ** 2))
+
+    # End timer and calculate the execution time
+    end_time = time.time()
+    execution_time = end_time - start_time
+    print(f"Time: {execution_time:.10f} secs")
+
+    return dist
+
+# GPU version of L2 distance calculation using Cupy
+def distance_l2_cp(X, Y):
+    # Start timer to measure execution time
+    start_time = time.time()
+
+    # Move the input arrays X and Y to the GPU memory (Cupy arrays)
+    X_gpu = cp.asarray(X)
+    Y_gpu = cp.asarray(Y)
+
+    # Calculate the L2 distance in parallel on the GPU
+    dist = cp.sqrt(cp.sum((X_gpu - Y_gpu) ** 2))
+
+    # End timer and calculate the execution time
+    end_time = time.time()
+    execution_time = end_time - start_time
+    print(f"Time: {execution_time:.10f} secs")
     
-    return cosine_distance
+    # Return the result back to the CPU as a numpy array
+    return cp.asnumpy(dist)
 
-def distance_l2(X, Y):
-    return torch.sqrt(torch.sum((X - Y)**2))
+# Raw CUDA kernel code for calculating L2 distance between two vectors X and Y
+l2_kernel_code = '''
+extern "C" __global__
+void calculate_diff_kernel(const float* X, const float* Y, float* diff, int D) {
+    // Each thread processes a single element of the vectors
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx < D) {
+        // Calculate the squared difference for each element
+        float diff_val = X[idx] - Y[idx];
+        diff[idx] = diff_val * diff_val;
+    }
+}
 
-def distance_dot(X, Y):
-    return X@Y
+extern "C" __global__
+void reduce_kernel(float* diff, int D) {
+    __shared__ float cache[256];  // Shared memory to store partial sums for reduction within a block
 
-def distance_manhattan(X, Y, device = torch.device("cuda")):
-    if not isinstance(Y,torch.Tensor):
-        Y = torch.tensor(Y, dtype=torch.float32, device=device)
-    if not isinstance(X,torch.Tensor):
-        X = torch.tensor(X, dtype=torch.float32, device=device)
-    return torch.sum(torch.abs(X - Y))
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    int tid = threadIdx.x;
+    
+    float sum = 0.0f;
+
+    // Each thread loads a value from the global memory and stores it in shared memory
+    if (idx < D) {
+        sum = diff[idx];
+    }
+
+    // Store the partial sum in shared memory
+    cache[tid] = sum;
+    __syncthreads();
+
+    // Perform parallel reduction within the block
+    for (int stride = blockDim.x / 2; stride > 0; stride /= 2) {
+        if (tid < stride) {
+            cache[tid] += cache[tid + stride];
+        }
+        __syncthreads();
+    }
+
+    // After reduction, the thread with idx 0 writes the final sum of the block to global memory
+    if (tid == 0) {
+        diff[blockIdx.x] = cache[0];
+    }
+}
+'''
+
+# GPU version of L2 distance calculation using custom CUDA kernels
+def distance_l2_kernel(X, Y):
+    # Start timer to measure execution time
+    start_time = time.time()
+
+    # Compile the CUDA kernel from the raw code
+    mod = cp.RawModule(code=l2_kernel_code)
+    func_diff_square = mod.get_function('calculate_diff_kernel')
+    func_sum = mod.get_function('reduce_kernel')
+
+    # Get the dimension of the input vectors
+    X_gpu = cp.asarray(X)
+    Y_gpu = cp.asarray(Y)
+    D = X_gpu.size 
+
+    # Allocate GPU memory for the squared differences
+    diff_gpu = cp.empty(D, dtype=cp.float32)
+
+    # Set the block size (number of threads per block) and grid size (number of blocks)
+    block_size = 256
+    grid_size = (D + block_size - 1) // block_size
+
+    # Launch the kernel to calculate the squared differences between the two vectors
+    func_diff_square(
+        (grid_size,), (block_size,),  # grid and block dimensions
+        (X_gpu, Y_gpu, diff_gpu, D)  # kernel arguments
+    )
+
+    # Perform parallel reduction to sum the squared differences
+    while D > 1:
+        grid_size = (D + block_size - 1) // block_size
+        func_sum(
+            (grid_size,), (block_size,),  # grid and block dimensions
+            (diff_gpu, D)  # kernel arguments
+        )
+        D = grid_size  # Reduce D to the number of remaining blocks
+
+    # End timer and calculate the execution time
+    end_time = time.time()
+    execution_time = end_time - start_time
+    print(f"Time: {execution_time:.10f} secs")
+
+    # The final result is stored in diff_gpu[0] after the reduction
+    return cp.asnumpy(cp.sqrt(diff_gpu[0]))  # Return the square root of the sum of squared differences
+
+
 
 # ------------------------------------------------------------------------------------------------
-# Your Task 1.2 code here
+# Manhattan
 # ------------------------------------------------------------------------------------------------
 
+# CPU version of Manhattan distance calculation using NumPy
+def manhattan_distance_numpy(X, Y):
+    # Start timer to measure execution time
+    start_time = time.time()
 
-def our_knn(N, D, A, X, K, device = torch.device("cuda")):
-    if not isinstance(A,torch.Tensor):
-        A = torch.tensor(A, dtype=torch.float32, device=device)
-    if not isinstance(X,torch.Tensor):
-        X = torch.tensor(X, dtype=torch.float32, device=device)
+    # Compute the Manhattan distance between vectors X and Y as the sum of absolute differences
+    dist = np.sum(np.abs(X - Y))
 
-    distances = torch.sqrt(torch.sum((A - X)**2, axis = 1))
-    _, indices = torch.topk(distances, K, largest=False)  # Get K nearest neighbors
+    # End timer and calculate the execution time
+    end_time = time.time()
+    execution_time = end_time - start_time
+    print(f"Time: {execution_time:.10f} secs")
 
-    return indices.cpu().numpy()
+    return dist
 
+# GPU version of Manhattan distance calculation using CuPy
+def manhattan_distance_cupy(X, Y):
+    # Start timer to measure execution time
+    start_time = time.time()
 
-def knn_torch(N, D, X, K, batch_size=50, device=torch.device("cuda")):
-    X = torch.tensor(X, dtype=torch.float32, device=device)  # Pasamos X a la GPU
+    # Transfer input vectors to GPU memory (Cupy arrays)
+    X_gpu = cp.asarray(X)
+    Y_gpu = cp.asarray(Y)
 
-    all_knn_distances = []
-    all_knn_indices = []
+    # Compute the Manhattan distance on the GPU
+    dist = cp.sum(cp.abs(X_gpu - Y_gpu))
 
-    # Procesamos por batches sin cargar toda `A` en memoria
-    for i in range(0, N, batch_size):
-        batch_size_actual = min(batch_size, N - i)  # Ajustar si estamos en el último batch
+    # End timer and calculate execution time
+    end_time = time.time()
+    execution_time = end_time - start_time
+    print(f"Time: {execution_time:.10f} secs")
 
-        # Generamos el batch de A en cada iteración sin almacenarlo completamente
-        batch_A = torch.rand(batch_size_actual, D, dtype=torch.float32, device=device)
+    return dist
 
-        # Calculamos la distancia L2 (Euclidiana)
-        distances = torch.sqrt(torch.sum((batch_A - X) ** 2, dim=1))
+# CUDA kernel for Manhattan distance calculation
+manhattan_kernel_optimized = cp.RawKernel(r'''
+extern "C" __global__
+void manhattan_distance_optimized(const float* X, const float* Y, float* result, int size) {
+    // Shared memory for parallel reduction within each block
+    extern __shared__ float sdata[];
 
-        # Obtenemos los K vecinos más cercanos dentro de este batch
-        knn_distances, knn_indices = torch.topk(distances, K, largest=False)
+    int tid = threadIdx.x;  // Thread index within a block
+    int idx = blockIdx.x * blockDim.x + tid;  // Global index for the data array
+    
+    // Load data into shared memory (handle boundary conditions)
+    sdata[tid] = (idx < size) ? fabsf(X[idx] - Y[idx]) : 0.0f;
+    __syncthreads();
 
-        # Convertimos los índices locales a índices globales en A
-        knn_indices += i
+    // Parallel reduction within a block
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            sdata[tid] += sdata[tid + s];  // Sum pairs of values
+        }
+        __syncthreads();
+    }
 
-        # Guardamos los resultados de este batch
-        all_knn_distances.append(knn_distances)
-        all_knn_indices.append(knn_indices)
+    // Only thread 0 of each block writes the partial sum to global memory
+    if (tid == 0) {
+        result = sdata[0];  // Store the sum of this block
+    }
+}
+''', 'manhattan_distance_optimized')
 
-    # Concatenamos todas las distancias e índices obtenidos de los batches
-    all_knn_distances = torch.cat(all_knn_distances)
-    all_knn_indices = torch.cat(all_knn_indices)
+# Optimized GPU function using a custom CUDA kernel
+def manhattan_distance_cupy_optimized(X, Y):
+    # Start timer to measure execution time
+    start_time = time.time()
 
-    # Seleccionamos los K vecinos más cercanos globalmente
-    _, final_indices = torch.topk(all_knn_distances, K, largest=False)
+    # Transfer input vectors to GPU memory as float32
+    X_gpu = cp.asarray(X, dtype=cp.float32)
+    Y_gpu = cp.asarray(Y, dtype=cp.float32)
 
-    return all_knn_indices[final_indices].cpu().numpy()  # Convertimos a numpy y devolvemos
+    # Allocate memory for the result on the GPU
+    result_gpu = cp.zeros(1, dtype=cp.float32)
 
+    # Define CUDA kernel launch parameters
+    threads_per_block = 256
+    blocks_per_grid = (X_gpu.size + threads_per_block - 1) // threads_per_block
+
+    # Launch the CUDA kernel using shared memory
+    manhattan_kernel_optimized(
+        (blocks_per_grid,),  # Number of blocks in the grid
+        (threads_per_block,),  # Number of threads per block
+        (X_gpu, Y_gpu, result_gpu, X_gpu.size),  # Kernel arguments
+        shared_mem=threads_per_block * 4  # Allocate shared memory (4 bytes per float)
+    )
+
+    # Transfer the result back to the CPU
+    result = result_gpu[0].get()
+
+    # End timer and calculate execution time
+    end_time = time.time()
+    execution_time = end_time - start_time
+    print(f"Time: {execution_time:.10f} secs")
+
+    return result
 
 # ------------------------------------------------------------------------------------------------
-# Your Task 2.1 code here
+# KNN
 # ------------------------------------------------------------------------------------------------
 
-def our_kmeans(N, D, A, K, max_iters=100, tol=1e-4, device = torch.device("cuda")):
-    if not isinstance(A,torch.Tensor):
-        A = torch.tensor(A, dtype=torch.float32, device=device)
+def our_knn_cpu(N, D, A, X, K, distance = "l2"):
+    #Start measuring the time
+    start_time = time.time()
+    
+    memory_limit = 2**28 #We assume 2GB of RAM memory
+    batch_size = min(N, memory_limit // (D * A.itemsize)) 
 
-    # Initialize centroids
-    indices = torch.randperm(N, device=device)[:K]
-    centroids = A[indices].clone()
+    #To store results of each batch
+    all_distances = []
+    all_indices = []
+    
+    # Process A with batches
+    for batch_start in range(0, N, batch_size):
+        batch_end = min(batch_start + batch_size, N)
+        
+        # Extract the current batch of A
+        batch_A = A[batch_start:batch_end]
+        
+        # Compute the distances from X to each point in the current batch of A based on the 'distance' argument
+        if distance == 'l2':  # Euclidean distance (L2)
+            distances = np.sqrt(np.sum((batch_A - X)**2, axis=1)).astype(np.float32)
+        elif distance == 'manhattan':  # Manhattan distance
+            distances = np.sum(np.abs(batch_A - X), axis=1).astype(np.float32)
+        elif distance == 'cosine':  # Cosine similarity
+            distances = 1 - (np.sum(batch_A * X, axis=1) / (np.linalg.norm(batch_A, axis=1) * np.linalg.norm(X))) 
+        elif distance == 'dot':
+            distances = np.sum(batch_A * X, axis=1).astype(np.float32)
+        else:
+            raise ValueError(f"Unsupported distance metric: {distance}")
+        
+        # Get the K nearest neighbors (indices and distances)
+        indices = np.argpartition(distances,K)[:K]
+        values = distances[indices]
+        
+        # Append results from the current batch
+        all_distances.append(values)
+        all_indices.append(indices + batch_start)  # Add the offset of the batch
+    
+    # Concatenate results from all batches
+    all_distances = np.concatenate(all_distances)
+    all_indices = np.concatenate(all_indices)
+    
+    # Select the K nearest neighbors globally
+    top_k_global_indices = np.argpartition(all_distances,K)[:K]
 
-    for _ in range(max_iters):
-        cluster_ids = torch.empty(N, device=device, dtype=torch.long)
+    # Stop measuring the time when we have found the indices
+    end_time = time.time()
+    execution_time = end_time - start_time
+    print(f"Total Time: {execution_time:.6f} seconds")
+    
+    return all_indices[top_k_global_indices]
 
-        distances = torch.cdist(A, centroids, p=2)
-        cluster_ids = torch.argmin(distances, dim=1)
+#---- FIRST DESIGN (BATCHING)----
+def our_knn_batching(N, D, A, X, K, distance="l2"):
+    start_time = time.time()
 
-        # Compute new centroids
-        new_centroids = torch.zeros_like(centroids)
-        counts = torch.zeros(K, device=device)
+    # Choose batch_size based on available GPU memory (assuming 2GB RAM)
+    memory_limit = 2**28 
+    batch_size = min(N, memory_limit // (D * A.itemsize))  # Divide by the number of bytes per vector in A
+    num_batches = (N + batch_size - 1) // batch_size  # Compute the number of batches
 
-        for i in range(K):
-            mask = (cluster_ids == i)
-            if mask.any():
-                new_centroids[i] = A[mask].mean(dim=0)
-                counts[i] = mask.sum()
+    # Most GPUs work well with 4 streams for parallel processing
+    num_streams = 4
+    streams = [cp.cuda.Stream() for _ in range(num_streams)]  # Create CUDA streams
+
+    # Move input vector X to GPU
+    X_gpu = cp.asarray(X).astype(cp.float32)
+    
+    # Lists to store distances and indices of the nearest neighbors
+    all_distances = cp.empty((K*num_batches,), dtype=cp.float32)
+    all_indices = cp.empty((K*num_batches,), dtype=cp.int32)
+
+    # Process A in batches
+    for batch_idx, batch_start in enumerate(range(0, N, batch_size)):
+        batch_end = min(batch_start + batch_size, N)
+
+        # Select appropriate stream for processing
+        stream = streams[batch_idx % num_streams]
+
+        with stream:
+
+            #Move batch of A to GPU
+            batch_A = cp.asarray(A[batch_start:batch_end])
+
+            # Compute distances based on the selected metric
+            if distance == 'l2':
+                distances = cp.sqrt(cp.sum((X_gpu - batch_A) ** 2, axis=1))
+            elif distance == 'manhattan':
+                distances = cp.sum(cp.abs(X_gpu - batch_A), axis=1)
+            elif distance == 'cosine':
+                distances = 1 - (cp.sum(batch_A * X_gpu, axis=1) / 
+                                    (cp.linalg.norm(batch_A, axis=1) * cp.linalg.norm(X_gpu)))
+            elif distance == 'dot':
+                distances = cp.sum(batch_A * X_gpu, axis=1).astype(cp.float32)
             else:
-                new_centroids[i] = A[torch.randint(0, N, (1,), device=device)].clone()
+                raise ValueError(f"Unsupported distance metric: {distance}")
 
-        centroids = new_centroids
+            
+            # Find top K nearest neighbors within the batch
+            indices = cp.argpartition(distances, K)[:K]
+            values = distances[indices]
+            
+            # Store results
+            all_indices[batch_idx*K : (batch_idx+1)*K] = indices + batch_start
+            all_distances[batch_idx*K : (batch_idx+1)*K] = values
 
-        if torch.norm(centroids - new_centroids) < tol:
-            break
+    # Synchronize all CUDA streams before further processing
+    for stream in streams:
+        stream.synchronize()
 
-    return cluster_ids.cpu().numpy(), centroids.cpu().numpy()
+    # Select the K nearest neighbors globally
+    if(num_batches > 1):
+        top_k_global_indices = cp.argpartition(all_distances, K)[:K]
+    else:
+        top_k_global_indices = indices
+
+    # Stop measuring the time when we have found the indices
+    end_time = time.time()
+    execution_time = end_time - start_time
+    print(f"Total Time: {execution_time:.6f} seconds")
+
+    return all_indices[top_k_global_indices]
+
+#---- SECOND DESIGN (BATCHING + CHUNK) -----
+def our_knn_chunks_manhattan(N, D, A, X, K):
+    start_time = time.time()
+
+    # Assume no more than 2GB of memory in GPU
+    memory_limit = 2**28
+    batch_size = min(N, memory_limit // (D * A.itemsize))  
+    num_batches = (N + batch_size - 1) // batch_size  
+
+    # If high dimensionality, then compute distances along chunks
+    num_chunks = 1
+    if(D > 32):
+        num_chunks = 32
+
+    chunk_size = D // num_chunks  
+
+    # 4 streams to compute distances of different chunks in paralell
+    num_streams = 4  
+    streams = [cp.cuda.Stream() for _ in range(num_streams)]
+
+    # Move X to the GPU
+    X_gpu = cp.asarray(X).astype(cp.float32)
+
+    #To store the results of each batch of A
+    all_distances = cp.empty((K*num_batches,), dtype=cp.float32)
+    all_indices = cp.empty((K*num_batches,), dtype=cp.int32)
+
+    # Process A  using batches
+    for batch_idx, batch_start in enumerate(range(0, N, batch_size)):
+        batch_end = min(batch_start + batch_size, N)
+
+        #Move the batch to the GPU
+        batch_A = cp.asarray(A[batch_start:batch_end]).astype(cp.float32)
+
+        # To store the distances of each chunk
+        partial_distances = cp.empty((num_chunks,batch_A.shape[0]), dtype=cp.float32)
+
+        # Compute distances of each chunk
+        for chunk_idx, chunk_start in enumerate(range(0, D, chunk_size)):
+            chunk_end = min(chunk_start + chunk_size, D)
+            stream = streams[chunk_idx % num_streams]
+
+            with stream:
+                #Manhattan distance of the chunk
+                diff = cp.abs(X_gpu[chunk_start:chunk_end] - batch_A[:, chunk_start:chunk_end])
+                partial_distances[chunk_idx] = cp.sum(diff, axis=1)
+
+        # Sincronizar los streams después de computar todas las distancias parciales
+        for stream in streams:
+            stream.synchronize()
+
+        #Combine the results of each chunk to compute the total distance
+        total_distances = cp.sum(partial_distances, axis = 0)
+
+        #Get the K lowest values of the batch
+        indices = cp.argpartition(total_distances, K)[:K]
+        values = total_distances[indices]
+
+        #Store the results of the batch
+        all_indices[batch_idx*K : (batch_idx+1)*K] = indices + batch_start
+        all_distances[batch_idx*K : (batch_idx+1)*K] = values
+
+    # Select the K lowest values across batches
+    if(num_batches > 1):
+        top_k_global_indices = cp.argpartition(all_distances, K)[:K]
+    else:
+        top_k_global_indices = indices
+
+    # Stop measuring the time when we have found the indices
+    execution_time = time.time() - start_time
+    print(f"Total Time: {execution_time:.6f} seconds")
+
+    return all_indices[top_k_global_indices]
+
+def our_knn_chunks_cosine(N, D, A, X, K):
+    start_time = time.time()
+
+    # Memory configuration and batch size calculation
+    memory_limit = 2**28  #  2GB memory limit
+    batch_size = min(N, memory_limit // (D * A.itemsize))  # Calculate the maximum batch size that fits in GPU memory
+    num_batches = (N + batch_size - 1) // batch_size  # Compute the number of batches required
+
+    # Determine the number of column chunks to split the data
+    num_chunks = 1
+    if D > 32:
+        num_chunks = 32  # Use 32 chunks if the dimension is large
+    chunk_size = D // num_chunks  # Divide columns into chunks
+
+    # Set up CUDA streams for parallel processing
+    num_streams = 4  # Use 4 streams to improve concurrency
+    streams = [cp.cuda.Stream() for _ in range(num_streams)]
+
+    # Move the input vector X to the GPU
+    X_gpu = cp.asarray(X).astype(cp.float32)
+
+    # Allocate memory for storing the K nearest neighbors
+    all_distances = cp.empty((K * num_batches,), dtype=cp.float32)
+    all_indices = cp.empty((K * num_batches,), dtype=cp.int32)
+
+    # Process the dataset A in batches
+    for batch_idx, batch_start in enumerate(range(0, N, batch_size)):
+        batch_end = min(batch_start + batch_size, N)
+
+        # Load a batch of A into GPU memory
+        batch_A = cp.asarray(A[batch_start:batch_end]).astype(cp.float32)
+
+        # Initialize storage for partial distances (one row per chunk)
+        partial_distances = cp.empty((num_chunks, batch_A.shape[0]), dtype=cp.float32)
+
+        # Process data in column chunks
+        for chunk_idx, chunk_start in enumerate(range(0, D, chunk_size)):
+            chunk_end = min(chunk_start + chunk_size, D)
+            stream = streams[chunk_idx % num_streams]  # Assign stream in a round-robin fashion
+
+            with stream:
+                # Compute the dot product for the cosine similarity
+                dot_product = cp.sum(X_gpu[chunk_start:chunk_end] * batch_A[:, chunk_start:chunk_end], axis=1)
+
+                # Compute the L2 norm for both X and A (required for cosine similarity)
+                norm_X = cp.linalg.norm(X_gpu[chunk_start:chunk_end])
+                norm_A = cp.linalg.norm(batch_A[:, chunk_start:chunk_end], axis=1)
+
+                # Store the cosine distance (1 - cosine similarity)
+                partial_distances[chunk_idx] = 1 - (dot_product / (norm_X * norm_A))
+
+        # Synchronize all streams to ensure computations are complete before proceeding
+        for stream in streams:
+            stream.synchronize()
+
+        # Sum partial distances across chunks to obtain the final cosine distances
+        total_distances = cp.sum(partial_distances, axis=0)
+
+        # Find the K nearest neighbors within the batch
+        indices = cp.argpartition(total_distances, K)[:K]  # Get the indices of the K smallest distances
+        values = total_distances[indices]  # Retrieve the corresponding distances
+
+        # Store results in global arrays
+        all_indices[batch_idx * K : (batch_idx + 1) * K] = indices + batch_start  # Adjust index to match the full dataset
+        all_distances[batch_idx * K : (batch_idx + 1) * K] = values
+
+    # If multiple batches were processed, find the K nearest neighbors globally
+    if num_batches > 1:
+        top_k_global_indices = cp.argpartition(all_distances, K)[:K]
+    else:
+        top_k_global_indices = indices  # If only one batch, we can directly return the batch's results
+
+    # Measure execution time
+    execution_time = time.time() - start_time
+    print(f"Total Time: {execution_time:.6f} seconds")
+
+    return all_indices[top_k_global_indices]
+
+def our_knn_chunks_dot(N, D, A, X, K):
+    start_time = time.time()
+
+    # Memory configuration and batch size calculation
+    memory_limit = 2**28  # 256 MiB memory limit
+    batch_size = min(N, memory_limit // (D * A.itemsize))  # Maximum batch size that fits in GPU memory
+    num_batches = (N + batch_size - 1) // batch_size  # Compute the number of batches needed
+
+    # Determine the number of column chunks to split the data
+    num_chunks = 1
+    if D > 32:
+        num_chunks = 32  # Use 32 chunks if the dimension is large
+    chunk_size = D // num_chunks  # Divide columns into chunks
+
+    # Set up CUDA streams for parallel processing
+    num_streams = 4  # Use 4 streams to improve concurrency
+    streams = [cp.cuda.Stream() for _ in range(num_streams)]
+
+    # Move the input vector X to the GPU
+    X_gpu = cp.asarray(X).astype(cp.float32)
+
+    # Allocate memory for storing the K nearest neighbors
+    all_distances = cp.empty((K * num_batches,), dtype=cp.float32)
+    all_indices = cp.empty((K * num_batches,), dtype=cp.int32)
+
+    # Process the dataset A in batches
+    for batch_idx, batch_start in enumerate(range(0, N, batch_size)):
+        batch_end = min(batch_start + batch_size, N)
+
+        # Load a batch of A into GPU memory
+        batch_A = cp.asarray(A[batch_start:batch_end]).astype(cp.float32)
+
+        # Initialize storage for partial dot product calculations (one row per chunk)
+        partial_distances = cp.empty((num_chunks, batch_A.shape[0]), dtype=cp.float32)
+
+        # Process data in column chunks
+        for chunk_idx, chunk_start in enumerate(range(0, D, chunk_size)):
+            chunk_end = min(chunk_start + chunk_size, D)
+            stream = streams[chunk_idx % num_streams]  # Assign stream in a round-robin fashion
+
+            with stream:
+                # Compute the dot product for the given chunk
+                dot_product = cp.sum(X_gpu[chunk_start:chunk_end] * batch_A[:, chunk_start:chunk_end], axis=1)
+
+                # Store the partial results
+                partial_distances[chunk_idx] = dot_product
+
+        # Synchronize all streams to ensure computations are complete before proceeding
+        for stream in streams:
+            stream.synchronize()
+
+        # Sum partial dot products across chunks to get the final similarity score
+        total_distances = cp.sum(partial_distances, axis=0)
+
+        # Find the K highest dot product values (since a higher dot product means higher similarity)
+        indices = cp.argpartition(total_distances, -K)[-K:]  # Get indices of the top-K highest values
+        values = total_distances[indices]  # Retrieve the corresponding values
+
+        # Store results in global arrays
+        all_indices[batch_idx * K : (batch_idx + 1) * K] = indices + batch_start  # Adjust index to match full dataset
+        all_distances[batch_idx * K : (batch_idx + 1) * K] = values
+
+    # If multiple batches were processed, find the top-K nearest neighbors globally
+    if num_batches > 1:
+        top_k_global_indices = cp.argpartition(all_distances, -K)[-K:]
+    else:
+        top_k_global_indices = indices  # If only one batch, return its results directly
+
+    # Measure execution time
+    execution_time = time.time() - start_time
+    print(f"Total Time: {execution_time:.6f} seconds")
+
+    return all_indices[top_k_global_indices]
+
+def our_knn_chunks_l2(N, D, A, X, K):
+    start_time = time.time()
+
+    # Memory configuration and batch size calculation
+    memory_limit = 2**28  # 256 MiB memory limit
+    batch_size = min(N, memory_limit // (D * A.itemsize))  # Maximum batch size that fits in GPU memory
+    num_batches = (N + batch_size - 1) // batch_size  # Compute the number of batches
+
+    # Determine the number of column chunks to split the data
+    num_chunks = 1
+    if D > 32:
+        num_chunks = 32  # Use 32 chunks if the dimension is large
+    chunk_size = D // num_chunks  # Divide columns into chunks
+
+    # Set up CUDA streams for parallel processing
+    num_streams = 4  # Use 4 streams for better parallelization
+    streams = [cp.cuda.Stream() for _ in range(num_streams)]
+
+    # Move the input vector X to the GPU
+    X_gpu = cp.asarray(X).astype(cp.float32)
+
+    # Allocate memory for storing the K nearest neighbors
+    all_distances = cp.empty((K * num_batches,), dtype=cp.float32)
+    all_indices = cp.empty((K * num_batches,), dtype=cp.int32)
+
+    # Process dataset A in batches
+    for batch_idx, batch_start in enumerate(range(0, N, batch_size)):
+        batch_end = min(batch_start + batch_size, N)
+
+        # Load a batch of A into GPU memory
+        batch_A = cp.asarray(A[batch_start:batch_end]).astype(cp.float32)
+
+        # Initialize storage for partial L2 distance calculations
+        partial_distances = cp.empty((num_chunks, batch_A.shape[0]), dtype=cp.float32)
+
+        # Process data in column chunks
+        for chunk_idx, chunk_start in enumerate(range(0, D, chunk_size)):
+            chunk_end = min(chunk_start + chunk_size, D)
+            stream = streams[chunk_idx % num_streams]  # Assign stream in a round-robin fashion
+
+            with stream:
+                # Compute squared difference for the chunk
+                diff = X_gpu[chunk_start:chunk_end] - batch_A[:, chunk_start:chunk_end]
+                partial_distances[chunk_idx] = cp.sum(diff ** 2, axis=1)  # Sum squared differences
+
+        # Synchronize all streams to ensure computations are complete before proceeding
+        for stream in streams:
+            stream.synchronize()
+
+        # Sum all partial squared distances and take the square root to get final L2 distance
+        total_distances = cp.sqrt(cp.sum(partial_distances, axis=0))
+
+        # Find the K smallest L2 distances (lower values indicate greater similarity)
+        indices = cp.argpartition(total_distances, K)[:K]  # Get indices of the top-K lowest values
+        values = total_distances[indices]  # Retrieve corresponding values
+
+        # Store results in global arrays
+        all_indices[batch_idx * K : (batch_idx + 1) * K] = indices + batch_start  # Adjust index to match full dataset
+        all_distances[batch_idx * K : (batch_idx + 1) * K] = values
+
+    # If multiple batches were processed, find the top-K nearest neighbors globally
+    if num_batches > 1:
+        top_k_global_indices = cp.argpartition(all_distances, K)[:K]
+    else:
+        top_k_global_indices = indices  # If only one batch, return its results directly
+
+    # Measure execution time
+    execution_time = time.time() - start_time
+    print(f"Total Time: {execution_time:.6f} seconds")
+
+    return all_indices[top_k_global_indices]
 
 # ------------------------------------------------------------------------------------------------
-# Your Task 2.2 code here
+# TOP K
 # ------------------------------------------------------------------------------------------------
+# CUDA Kernel for performing top-K selection using radix sort
+kernel_code = '''
+extern "C" __global__
+void topK_radix_sort(const float* arr, int* indices, float* values, int N, int K) {
+    extern __shared__ float shared_data[];
 
-# You can create any kernel here
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + tid;
 
+    #define INF 3.402823466e+38f  // Define an "infinity" value for padding
 
-def our_ann(N, D, A, X, K, C = 10, K1=5, K2=10, device = torch.device("cuda")):
+    // Pointers to shared memory
+    float* shared_vals = shared_data;
+    int* shared_idx = (int*)&shared_vals[blockDim.x];
+
+    // Number of elements in this block
+    int elements_in_block = min(blockDim.x, N - blockIdx.x * blockDim.x);
+
+    // Load values into shared memory
+    if (idx < N) {
+        shared_vals[tid] = arr[idx];
+        shared_idx[tid] = idx;
+    } else {
+        shared_vals[tid] = INF;  // Padding with infinity for out-of-bounds indices
+        shared_idx[tid] = -1;
+    }
+    __syncthreads();
+
+    // ========================
+    // ** GPU RADIX SORT **
+    // ========================
+    int max_bits = 32;  // Max bits for floating-point values (as integers)
+    for (int bit = 0; bit < max_bits; bit++) {
+        int mask = 1 << bit;
+        int prefix_sum = 0;
+
+        // Count zeros in the current bit position
+        for (int i = 0; i < elements_in_block; i++) {
+            if (!((__float_as_int(shared_vals[i]) & mask) > 0)) {
+                prefix_sum++;
+            }
+        }
+        __syncthreads();
+
+        // Temporary arrays for sorting
+        float temp_vals[256];  
+        int temp_idx[256];
+        int zero_pos = 0, one_pos = prefix_sum;
+
+        // Distribute elements based on the current bit value
+        for (int i = 0; i < elements_in_block; i++) {
+            int bit_val = (__float_as_int(shared_vals[i]) & mask) > 0;
+            if (bit_val == 0) {
+                temp_vals[zero_pos] = shared_vals[i];
+                temp_idx[zero_pos] = shared_idx[i];
+                zero_pos++;
+            } else {
+                temp_vals[one_pos] = shared_vals[i];
+                temp_idx[one_pos] = shared_idx[i];
+                one_pos++;
+            }
+        }
+        __syncthreads();
+
+        // Copy sorted values back to shared memory
+        for (int i = 0; i < elements_in_block; i++) {
+            shared_vals[i] = temp_vals[i];
+            shared_idx[i] = temp_idx[i];
+        }
+        __syncthreads();
+    }
+
+    // Store the top-K smallest values in global memory
+    if (tid < K && (blockIdx.x * K + tid) < N) {
+        values[blockIdx.x * K + tid] = shared_vals[tid];
+        indices[blockIdx.x * K + tid] = shared_idx[tid];
+    }
+}
+'''
+
+def our_topK(arr, K, all_indices=None, final=False):
     """
-    Approximate Nearest Neighbor search optimized for GPU using PyTorch.
-    
+    Find the top-K smallest values in an array using a parallel radix sort on GPU.
+
     Parameters:
-      N (int): Number of vectors.
-      D (int): Dimension of vectors.
-      A (numpy.ndarray): Data matrix of shape (N, D).
-      X (numpy.ndarray): Query vector of shape (D,).
-      K (int): Number of top nearest neighbors to return (as indices).
+    - arr: Input array (Cupy array)
+    - K: Number of top-K smallest elements to find
+    - all_indices: (Optional) Used to map indices to original positions in a multi-step KNN search
+    - final: (Optional) If True, map the indices to the original input dataset
 
     Returns:
-      numpy.ndarray: An array of shape (K,) containing the indices of the top K nearest vectors.
+    - values: The K smallest values found
+    - indices: Their corresponding indices
     """
-    # Convert A and X into torch tensors
-    if not isinstance(A,torch.Tensor):
-        A_tensor = torch.tensor(A, dtype=torch.float32, device=device)
-    if not isinstance(X,torch.Tensor):
-        X_tensor = torch.tensor(X, dtype=torch.float32, device=device).unsqueeze(0)  # (1, D)
 
-    # Step 1: Choose the number of clusters (C)
-    C = min(C, N)  
+    # Load the CUDA kernel
+    mod = cp.RawModule(code=kernel_code)
+    func_topk = mod.get_function('topK_radix_sort')
 
-    # Step 2: Use our_kmeans to cluster A into C clusters
-    assignments, centroids = our_kmeans(N, D, A, C)  # Returns cluster labels & centroids
-    assignments = torch.tensor(assignments, dtype=torch.long, device=device)
-    centroids = torch.tensor(centroids, dtype=torch.float32, device=device)
+    # Configure CUDA execution
+    threads_per_block = 256
+    blocks_per_grid = (arr.shape[0] + threads_per_block - 1) // threads_per_block
+    shared_mem_size = 2 * threads_per_block * arr.itemsize  # Shared memory for sorting
 
-    # Step 3: Find the K1 nearest clusters to X
-    K1 = min(K1, C)
-    cluster_distances = torch.sqrt(torch.sum((X_tensor - centroids)**2, axis = 1))
-    nearest_cluster_indices = torch.topk(cluster_distances, k=K1, largest=False).indices
+    # Allocate memory for results
+    values = cp.empty((blocks_per_grid, K), dtype=arr.dtype)
+    indices = cp.empty((blocks_per_grid, K), dtype=cp.int32)
 
-    # Step 4: Find the K2 nearest neighbors within those clusters
-    K2 = 10  # Number of candidates per cluster
-    candidate_indices = []
-    
-    for c in nearest_cluster_indices:
-        cluster_mask = (assignments == c)  # Boolean mask for cluster
-        cluster_indices = torch.nonzero(cluster_mask, as_tuple=True)[0]  # Indices of points in this cluster
+    # First pass: Perform top-K selection on blocks
+    func_topk(
+        (blocks_per_grid,), (threads_per_block,),
+        (arr, indices, values, arr.shape[0], K),
+        shared_mem=shared_mem_size
+    )
 
-        if len(cluster_indices) > 0:
-            # Compute distances within the cluster
-            cluster_points = A_tensor[cluster_indices]
-            K2 = min(K2, len(cluster_indices))
-            local_knn_indices = torch.tensor(our_knn(N, D, cluster_points, X_tensor, K2))
-            # Convert local indices to global indices
-            candidate_indices.extend(cluster_indices[local_knn_indices].tolist())
+    # Map indices back to original dataset if final processing step
+    if final:
+        indices = all_indices[indices]
 
-    # Step 5: Select the overall top K nearest neighbors
-    candidate_points = A_tensor[candidate_indices]
-    K = min(K, len(candidate_indices))
-    final_top_indices = our_knn(N, D, candidate_points, X_tensor, K2)
- 
-    
-    return np.array(candidate_indices)[final_top_indices]
+    values = values.flatten()
+    indices = indices.flatten()
 
+    # Reduce multiple blocks until only one block remains
+    while blocks_per_grid > 1:
+        values_1 = cp.empty((blocks_per_grid, K), dtype=values.dtype)
+        indices_1 = cp.empty((blocks_per_grid, K), dtype=cp.int32)
 
+        func_topk(
+            (blocks_per_grid,), (threads_per_block,),
+            (values, indices_1, values_1, values.shape[0], K),
+            shared_mem=shared_mem_size
+        )
 
+        values = values_1
+        indices = indices[indices_1]
+        values = values.flatten()
+        indices = indices.flatten()
+        blocks_per_grid = (values.shape[0] + threads_per_block - 1) // threads_per_block
+
+    # Final pass to get the top-K results from the last remaining block
+    values_1 = cp.empty((blocks_per_grid, K), dtype=values.dtype)
+    indices_1 = cp.empty((blocks_per_grid, K), dtype=cp.int32)
+
+    func_topk(
+        (blocks_per_grid,), (threads_per_block,),
+        (values, indices_1, values_1, values.shape[0], K),
+        shared_mem=shared_mem_size
+    )
+
+    values = values_1
+    indices = indices[indices_1]
+    values = values.flatten()
+    indices = indices.flatten()
+
+    return values, indices
 # ------------------------------------------------------------------------------------------------
 # Test your code here
 # ------------------------------------------------------------------------------------------------
 
-def test_kmeans():
-    N, D, A, K = testdata_kmeans("")
-    kmeans_result = our_kmeans(N, D, A, K)
-    print(kmeans_result)
+def test_l2(D):
+    for d in D:
+        print(d)
+        for i in range(0,3):
+            np.random.seed(42)
+            X = np.random.randn(d).astype(np.float32)
+            Y = np.random.randn(d).astype(np.float32)
+            print(distance_l2_cpu(X,Y))
+            print(distance_l2_cp(X,Y))
+            print(distance_l2_kernel(X,Y))
+
+def test_manhattan(D):
+
+    for d in D:
+        print(d)
+        for i in range(0,3):
+            np.random.seed(42)
+            X = np.random.randn(d).astype(np.float32)
+            Y = np.random.randn(d).astype(np.float32)
+            print(manhattan_distance_cupy(X,Y))
+            print(manhattan_distance_numpy(X,Y))
+            print(manhattan_distance_cupy_optimized(X,Y))
 
 def test_knn():
-    N, D, A, X, K = testdata_knn("")
-    knn_result = our_knn(N, D, A, X, K)
-    print(knn_result)
-    
-def test_ann():
-    N, D, A, X, K = testdata_ann("")
-    ann_result = our_ann(N, D, A, X, K)
-    print(ann_result)
-    
-def recall_rate(list1, list2):
-    """
-    Calculate the recall rate of two lists
-    list1[K]: The top K nearest vectors ID
-    list2[K]: The top K nearest vectors ID
-    """
-    return len(set(list1) & set(list2)) / len(list1)
-
-def test_ann_recall():
-    N, D, A, X, K = testdata_ann("")
-    ann_result = our_ann(N, D, A, X, K)
-    knn_result = our_knn(N, D, A, X, K)
-    print(knn_result)
-    print(ann_result)
-    print(recall_rate(ann_result,knn_result))
+    N, D, A, X, K = testdata_knn("Data/test_data.json")
+    #N, D, A, X, K = testdata_knn("")
+    sys.stdout.flush()
+    print(N)
+    sys.stdout.flush()
+    print(D)
+    sys.stdout.flush()
 
 
-def compute_recall(N, D, A, X, K):
-    knn_indices = our_knn(N, D, A, X, K).tolist()
-    ann_indices = our_ann(N, D, A, X, K).tolist()
+    for i in range(0,2):
+        print(i)
+        sys.stdout.flush()
+        print("COSINE")
+        print("DESIGN 1")
+        sys.stdout.flush()
+        print(our_knn_batching(N, D, A, X, K, "cosine"))
+        sys.stdout.flush()
+        print("DESIGN 2")
+        sys.stdout.flush()
+        print(our_knn_chunks_cosine(N, D, A, X, K))
+        sys.stdout.flush()
+        print("CPU")
+        sys.stdout.flush()
+        print(our_knn_cpu(N, D, A, X, K, "cosine"))
 
-    knn_set = set(knn_indices)
-    ann_set = set(ann_indices)
+    for i in range(0,2):
+        print(i)
+        sys.stdout.flush()
+        print("DOT")
+        print("DESIGN 1")
+        sys.stdout.flush()
+        print(our_knn_batching(N, D, A, X, K, "dot"))
+        sys.stdout.flush()
+        print("DESIGN 2")
+        sys.stdout.flush()
+        print(our_knn_chunks_dot(N, D, A, X, K))
+        sys.stdout.flush()
+        print("CPU")
+        sys.stdout.flush()
+        print(our_knn_cpu(N, D, A, X, K, "dot"))
 
-    recall = len(knn_set & ann_set) / K  
-    return recall
+    for i in range(0,2):
+        print(i)
+        sys.stdout.flush()
+        print("manhattan")
+        print("DESIGN 1")
+        sys.stdout.flush()
+        print(our_knn_batching(N, D, A, X, K, "manhattan"))
+        sys.stdout.flush()
+        print("DESIGN 2")
+        sys.stdout.flush()
+        print(our_knn_chunks_manhattan(N, D, A, X, K))
+        sys.stdout.flush()
+        print("CPU")
+        sys.stdout.flush()
+        print(our_knn_cpu(N, D, A, X, K, "manhattan"))
 
-# ------------------------------------------------------------------------------------------------
-# Benchmarking functions
-# ------------------------------------------------------------------------------------------------
-
-def run_benchmark(N, D, K):
-    """
-    Executes all benchmarks for a given dataset size and dimension.
-    """
-    # Generate random dataset and query vector
-    A = np.random.rand(N, D).astype(np.float32)
-    X = np.random.rand(D).astype(np.float32)
-
-    # Run benchmarks
-    results = {
-        "Manhattan Distance": benchmark_function(distance_manhattan,N, D, A, X, K),
-        "KNN": benchmark_function(our_knn, N, D, A, X, K),
-        "K-Means": benchmark_function(our_kmeans, N, D, A, X, K),
-        "ANN": benchmark_function(our_ann, N, D, A, X, K)
-    }
-    recall_value = compute_recall(N, D, A, X, K)
-    print(f"Recall ANN vs KNN: {recall_value:.2%}")
-
-    return results
-
-def run_benchmark_batching(N, D, K, batch_size=500000):
-    """Ejecuta todos los benchmarks con procesamiento por lotes."""
-
-    #Solo almacenamos `X`
-    X = np.random.rand(D).astype(np.float32)
-
-    #Run benchmarks sin almacenar `A`
-    results = {
-        "KNN": benchmark_knn_batching(our_knn_batching, N, D, X, K, batch_size=batch_size)
-    }
-    return results
-
-def benchmark_function(func, N, D, A, X, K, num_repeats=10):
-    """
-    Generic benchmarking function for CPU vs GPU.
-    """
-    # CPU Benchmark
-    if(func == distance_manhattan):
-        Y = np.random.rand(D).astype(np.float32)
-        start_cpu = time.time()
-        for _ in range(num_repeats):
-            func(X , Y, device = "cpu")
-        cpu_time = (time.time() - start_cpu) / num_repeats
-    elif(func == our_knn):
-        start_cpu = time.time()
-        for _ in range(num_repeats):
-            func(N, D, A, X, K, device = "cpu")
-        cpu_time = (time.time() - start_cpu) / num_repeats
-    elif(func == our_kmeans):
-        start_cpu = time.time()
-        for _ in range(num_repeats):
-            func(N, D, A, K, device = "cpu")
-        cpu_time = (time.time() - start_cpu) / num_repeats
-    elif(func == our_ann):
-        start_cpu = time.time()
-        for _ in range(num_repeats):
-            func(N, D, A, X, K, device = "cpu")
-        cpu_time = (time.time() - start_cpu) / num_repeats
-
-
-    # GPU Benchmark
-    gpu_time = None
-    if torch.cuda.is_available():    
-        if(func == distance_manhattan):
-            Y = np.random.rand(D).astype(np.float32)
-            torch.cuda.synchronize()
-            start_gpu = time.time()
-            for _ in range(num_repeats):
-                func(X, Y)
-            torch.cuda.synchronize()
-            gpu_time = (time.time() - start_gpu) / num_repeats
-        elif(func == our_knn):
-            torch.cuda.synchronize()
-            start_gpu = time.time()
-            for _ in range(num_repeats):
-                func(N, D, A, X, K)
-            torch.cuda.synchronize()
-            gpu_time = (time.time() - start_gpu) / num_repeats
-        elif(func == our_kmeans):
-            torch.cuda.synchronize()
-            start_gpu = time.time()
-            for _ in range(num_repeats):
-                func(N, D, A, K)
-            gpu_time = (time.time() - start_gpu) / num_repeats
-        elif(func == our_ann):
-            torch.cuda.synchronize()
-            start_gpu = time.time()
-            for _ in range(num_repeats):
-                func(N, D, A, X, K)
-            gpu_time = (time.time() - start_gpu) / num_repeats
-
-    speedup = cpu_time / gpu_time if gpu_time else None
-    return cpu_time, gpu_time, speedup
-
-def benchmark_knn_batching(func, N, D, X, K, num_repeats=1, batch_size=500000):
-    """Generic benchmarking function for CPU vs GPU using batch processing."""
-
-    #CPU Benchmark
-    """start_cpu = time.time()
-    for _ in range(num_repeats):
-        func(N, D, X, K, batch_size, device = "cpu")
-    cpu_time = (time.time() - start_cpu) / num_repeats"""
-    cpu_time = 0
-    #GPU Benchmark
-    gpu_time = None
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-        start_gpu = time.time()
-        for _ in range(num_repeats):
-            func(N, D, X, K, batch_size, device="cuda")
-        torch.cuda.synchronize()
-        gpu_time = (time.time() - start_gpu) / num_repeats
-
-    speedup = cpu_time / gpu_time if gpu_time else None
-    return cpu_time, gpu_time, speedup
+    for i in range(0,2):
+        print(i)
+        sys.stdout.flush()
+        print("l2")
+        print("DESIGN 1")
+        sys.stdout.flush()
+        print(our_knn_batching(N, D, A, X, K, "l2"))
+        sys.stdout.flush()
+        print("DESIGN 2")
+        sys.stdout.flush()
+        print(our_knn_chunks_l2(N, D, A, X, K))
+        sys.stdout.flush()
+        print("CPU")
+        sys.stdout.flush()
+        print(our_knn_cpu(N, D, A, X, K, "l2"))
 
 
 if __name__ == "__main__":
-    torch.manual_seed(42) 
-    #test_knn()
-    #test_kmeans()
-    #test_ann()
-    #test_ann_recall()
-
-    dimensions = [2, 1024, 32768]
-    sizes = [4000, 4000000]
-    K = 5
-
-    print("\nBenchmark - CPU vs GPU Performance")
-    print(" N       | D        | Function              | CPU Time (s)  | GPU Time (s)  | Speedup ")
-    print("-" * 100)
-
-    for D in dimensions:
-        if(D <= K):
-            K = D-1
-        for N in sizes:
-            """if(N > 1000000):
-                batch_size = 5000
-                results = run_benchmark_batching(N, D, K, batch_size=batch_size)
-            else:
-                results = run_benchmark(N, D, K)"""
-            batch_size = 50
-            results = run_benchmark_batching(N, D, K, batch_size=batch_size)
-            for func_name, (cpu_time, gpu_time, speedup) in results.items():
-                print(f"{N:<8} | {D:<8} | {func_name:<20} | {cpu_time:<12.6f} | {gpu_time if gpu_time else 'N/A':<12} | {speedup if speedup else 'N/A'}")
-
-
-
-
-    
+    test_knn()
+    test_manhattan(D = [2, 1024, 2**15,2**20])
+    test_l2(D = [2, 1024, 2**15,2**20])
