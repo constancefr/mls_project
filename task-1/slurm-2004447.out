@@ -1,0 +1,6 @@
+/home/s2666210/miniconda3/envs/mlsys/lib/python3.10/site-packages/numpy/linalg/_linalg.py:2780: RuntimeWarning: overflow encountered in multiply
+  s = (x.conj() * x).real
+Traceback (most recent call last):
+  File "/home/s2666210/mls_project/task-1/task.py", line 775, in <module>
+    A = np.array(A_memmap)  # convert to regular numpy array
+numpy._core._exceptions._ArrayMemoryError: Unable to allocate 488. GiB for an array with shape (4000000, 32768) and data type float32

@@ -39,23 +39,18 @@ def measure_time(func, device, *args, **kwargs):
 
     return result, elapsed_time
 
-
 def print_table(results):
-    print("Benchmark - CPU vs GPU Performance")
-    print(" N       | D        | Function                       | CPU Time (s)  | GPU Time (s)  | Speedup ")
+    print("Benchmark - Euclidean Distance vs. Cosine Distance Performance")
+    print(" N       | D        | Function                       | Euclidean Time (s)  | Cosine Time (s)  | Speedup ")
     print("---------------------------------------------------------------------------------------------------")
     for result in results:
-        N, D, func, cpu_time, gpu_time = result
-        speedup = cpu_time / gpu_time
-        print(f"{N:<8} | {D:<8} | {func:<24}       | {cpu_time:.6f}      | {gpu_time:.6f}      | {speedup:.2f}x")
+        N, D, func, l2_time, cosine_time = result
+        speedup = l2_time / cosine_time
+        print(f"{N:<8} | {D:<8} | {func:<24}       | {l2_time:.6f}      | {cosine_time:.6f}      | {speedup:.2f}x")
 
 # ------------------------------------------------------------------------------------------------
 # Your Task 1.1 code here
 # ------------------------------------------------------------------------------------------------
-
-# You can create any kernel here
-# def distance_kernel(X, Y, D):
-#     pass
 
 def distance_cosine_torch(X, Y):
     """
@@ -108,7 +103,6 @@ def distance_cosine(X, Y):
     
     return cosine_distance
 
-
 def distance_l2(X, Y):
     """
     Compute the pairwise Euclidean distance (L2 distance) between rows of X and Y.
@@ -133,7 +127,6 @@ def distance_l2(X, Y):
     # Compute the square root to get final distances
     return torch.sqrt(squared_dist)
 
-
 def distance_dot(X, Y):
     pass
 
@@ -143,8 +136,6 @@ def distance_manhattan(X, Y):
 # ------------------------------------------------------------------------------------------------
 # Your Task 1.2 code here
 # ------------------------------------------------------------------------------------------------
-
-# You can create any kernel here
 
 def our_knn(N, D, A, X, K, device="cuda"): 
     """
@@ -191,31 +182,7 @@ Possible optimisations:
 #     pass
 
 # TORCH ------------------------------------------------------------------------------------------
-def distance_l2(X, Y):
-    """
-    Compute the pairwise Euclidean distance (L2 distance) between rows of X and Y.
-    
-    Args:
-        X (torch.Tensor): Tensor of shape (m, d)
-        Y (torch.Tensor): Tensor of shape (n, d)
-    
-    Returns:
-        torch.Tensor: Euclidean distance matrix of shape (m, n)
-    """
-    # Compute squared norms of each row in X and Y
-    X_norm_sq = torch.sum(X ** 2, dim=1, keepdim=True)  # Shape: (m, 1)
-    Y_norm_sq = torch.sum(Y ** 2, dim=1, keepdim=True)  # Shape: (n, 1)
-
-    # Compute pairwise squared distances using broadcasting
-    squared_dist = X_norm_sq + Y_norm_sq.T - 2 * torch.mm(X, Y.T)
-
-    # Ensure numerical stability (avoid sqrt of negative values due to precision errors)
-    squared_dist = torch.clamp(squared_dist, min=0.0)
-
-    # Compute the square root to get final distances
-    return torch.sqrt(squared_dist)
-
-def kmeans_torch(N, D, A, K, max_iters=100, tol = 1e-4, device="cuda"):
+def kmeans_torch(N, D, A, K, max_iters=100, tol = 1e-4, device="cuda", distance_metric="l2"):
     """
     Perform K-Means clustering on a dataset.
 
@@ -231,8 +198,12 @@ def kmeans_torch(N, D, A, K, max_iters=100, tol = 1e-4, device="cuda"):
         torch.Tensor: Tensor of shape (N,) with cluster assignments
     """
 
+    # if isinstance(A, np.ndarray):
+    #     A = torch.tensor(A, dtype=torch.float32, device=device)
     if isinstance(A, np.ndarray):
         A = torch.tensor(A, dtype=torch.float32, device=device)
+    elif not isinstance(A, torch.Tensor):
+        raise TypeError(f"Input must be either numpy array or torch tensor, got {type(A)}.")
 
     # Step 1: Initialize K random points from A as initial centroids
     indices = torch.randperm(N)[:K]
@@ -242,8 +213,14 @@ def kmeans_torch(N, D, A, K, max_iters=100, tol = 1e-4, device="cuda"):
         old_centroids = centroids.clone()
 
         # Step 2a: Assignment Step - Compute distances and assign clusters
-        distances = distance_l2(A, centroids)  # A: (N, D), centroids: (K, D)
-        cluster_assignments = distances.argmin(dim=1)  # Shape (N,)
+        if distance_metric == "l2":
+            distances = distance_l2(A, centroids)  # A: (N, D), centroids: (K, D)
+        elif distance_metric == "cosine":
+            distances = distance_cosine_torch(A, centroids)
+        else:
+            raise ValueError("Invalid distance metric. Use 'l2' or 'cosine'.")
+        
+        cluster_assignments = distances.argmin(dim=1)
 
         # Step 2b: Update Step - Compute new centroids
         centroids = torch.zeros(K, D, device=device)  # Placeholder for new centroids
@@ -264,32 +241,60 @@ def kmeans_torch(N, D, A, K, max_iters=100, tol = 1e-4, device="cuda"):
     return cluster_assignments
 
 # CUPY DESIGN 1 ----------------------------------------------------------------------------------
-def kmeans_cupy_1(N, D, A, K, max_iters=100, tol=1e-4):
-     # Convert input data to CuPy arrays
-     A = cp.asarray(A, dtype=cp.float32)
-     
-     # Step 1: Initialize K random centroids
-     indices = cp.random.choice(N, K, replace=False)
-     centroids = A[indices].copy()
-     
-     for _ in range(max_iters):
-         # Step 2a: Compute distances and assign clusters
-         distances = cp.linalg.norm(A[:, cp.newaxis] - centroids, axis=2)  # Shape: (N, K)
-         cluster_assignments = cp.argmin(distances, axis=1)  # Shape: (N,)
-         
-         # Step 2b: Update centroids using advanced indexing and reduction
-         new_centroids = cp.zeros((K, D), dtype=cp.float32)
-         for k in range(K):
-             mask = cluster_assignments == k
-             if cp.any(mask):
-                 new_centroids[k] = cp.mean(A[mask], axis=0)
-         
-         # Step 3: Check for convergence
-         if cp.linalg.norm(new_centroids - centroids) < tol:
-             break
-         centroids = new_centroids
-     
-     return cluster_assignments.get()
+def kmeans_cupy_1(N, D, A, K, max_iters=100, tol=1e-4, distance_metric="l2"):
+    """
+    K-Means clustering using CuPy with support for multiple distance metrics.
+    
+    Args:
+        N (int): Number of data points.
+        D (int): Dimension of each data point.
+        A (np.ndarray or cp.ndarray): Input data of shape (N, D).
+        K (int): Number of clusters.
+        max_iters (int): Maximum number of iterations.
+        tol (float): Tolerance for convergence checking.
+        distance_metric (str): Distance metric to use ("l2" or "cosine").
+    
+    Returns:
+        cluster_assignments (np.ndarray): Indices of closest clusters for each data point.
+    """
+    # Convert input data to CuPy array
+    A = cp.asarray(A, dtype=cp.float32)
+    
+    # Initialize centroids
+    indices = cp.random.choice(N, K, replace=False)
+    centroids = A[indices].copy()
+    
+    for _ in range(max_iters):
+        # Compute distances based on selected metric
+        if distance_metric == "l2":
+            # Euclidean distance
+            distances = cp.linalg.norm(A[:, cp.newaxis] - centroids, axis=2)
+        elif distance_metric == "cosine":
+            # Cosine distance (1 - cosine similarity)
+            A_norm = A / cp.linalg.norm(A, axis=1, keepdims=True)
+            centroids_norm = centroids / cp.linalg.norm(centroids, axis=1, keepdims=True)
+            cosine_sim = cp.dot(A_norm, centroids_norm.T)
+            distances = 1 - cosine_sim
+        else:
+            raise ValueError("Invalid distance metric. Use 'l2' or 'cosine'.")
+        
+        # Assign clusters
+        cluster_assignments = cp.argmin(distances, axis=1)
+        
+        # Update centroids
+        new_centroids = cp.zeros((K, D), dtype=cp.float32)
+        for k in range(K):
+            mask = cluster_assignments == k
+            if cp.any(mask):
+                new_centroids[k] = cp.mean(A[mask], axis=0)
+        
+        # Check convergence
+        if cp.linalg.norm(new_centroids - centroids) < tol:
+            break
+            
+        centroids = new_centroids
+    
+    return cluster_assignments.get()
 
 # CUPY DESIGN 2 ----------------------------------------------------------------------------------
 l2_closest_kernel = """
@@ -519,13 +524,16 @@ def kmeans_cupy_2(N,D,A,K, max_iters=100, tol=1e-4, random_state=None, batch_siz
     return centroids, assignments
 
 # NUMPY BASELINE ---------------------------------------------------------------------------------
-def numpy_closest_index(x, y):
+import numpy as np
+
+def numpy_closest_index(x, y, distance_metric="l2"):
     """
     Compute the nearest centroid for each data point using NumPy.
     
     Args:
         x (np.ndarray): Data points of shape (N, D).
         y (np.ndarray): Centroids of shape (M, D).
+        distance_metric (str): Distance metric to use ("l2" or "cosine").
     
     Returns:
         output (np.ndarray): Indices of nearest centroids for each data point.
@@ -534,15 +542,24 @@ def numpy_closest_index(x, y):
     M, D_y = y.shape
     assert D == D_y, "Dimensions of x and y must match"
 
-    # Compute squared Euclidean distances between all data points and centroids
-    distances = np.linalg.norm(x[:, np.newaxis, :] - y[np.newaxis, :, :], axis=2)  # Shape (N, M)
+    if distance_metric == "l2":
+        # Compute squared Euclidean distances between all data points and centroids
+        distances = np.linalg.norm(x[:, np.newaxis, :] - y[np.newaxis, :, :], axis=2)  # Shape (N, M)
+    elif distance_metric == "cosine":
+        # Compute cosine distances (1 - cosine similarity)
+        x_norm = x / np.linalg.norm(x, axis=1, keepdims=True)
+        y_norm = y / np.linalg.norm(y, axis=1, keepdims=True)
+        cosine_sim = np.dot(x_norm, y_norm.T)  # Shape (N, M)
+        distances = 1 - cosine_sim  # Convert similarity to distance
+    else:
+        raise ValueError("Invalid distance metric. Use 'l2' or 'cosine'.")
 
     # Find the index of the nearest centroid for each data point
     output = np.argmin(distances, axis=1)  # Shape (N,)
 
     return output
 
-def kmeans_numpy(N, D, A, K, max_iters=100, tol=1e-4, random_state=None):
+def kmeans_numpy(N, D, A, K, max_iters=100, tol=1e-4, random_state=None, distance_metric="l2"):
     """
     K-Means clustering using NumPy (CPU implementation).
     
@@ -554,6 +571,7 @@ def kmeans_numpy(N, D, A, K, max_iters=100, tol=1e-4, random_state=None):
         max_iters (int): Maximum number of iterations.
         tol (float): Tolerance for convergence checking.
         random_state (int): Seed for random number generation.
+        distance_metric (str): Distance metric to use ("l2" or "cosine").
     
     Returns:
         centroids (np.ndarray): Final centroids of shape (K, D).
@@ -572,7 +590,7 @@ def kmeans_numpy(N, D, A, K, max_iters=100, tol=1e-4, random_state=None):
     # Iterate until convergence or max_iters is reached
     for _ in range(max_iters):
         # Step 1: Assignment Step - Compute distances and assign clusters
-        assignments = numpy_closest_index(A, centroids)
+        assignments = numpy_closest_index(A, centroids, distance_metric=distance_metric)
 
         # Step 2: Update Step - Compute new centroids
         new_centroids = np.zeros((K, D), dtype=np.float32)
@@ -665,34 +683,44 @@ def our_ann(N, D, A, X, K, K1=5, K2=10, device="cuda"):
 # Test your code here
 # ------------------------------------------------------------------------------------------------
 
-def test_kmeans_torch(N, D, A, K):
-    # N, D, A, K = testdata_kmeans("")
-    measure_time(kmeans_torch, "cpu", N, D, A, 1) # warmup
-    cpu_result, cpu_time = measure_time(kmeans_torch, "cpu", N, D, A, K)
-    gpu_torch_result, gpu_torch_time = measure_time(kmeans_torch, "cuda", N, D, A, K)
+def test_kmeans_torch_cpu(N, D, A, K):
+    # measure_time(kmeans_torch, "cpu", N, D, A, 1) # warmup
+    measure_time(kmeans_torch, "cpu", N, D, A, 1, 100, 1e-4, "cpu", distance_metric="l2") # warmup
+    # CPU Torch l2 vs. cosine
+    l2_cpu_result, l2_cpu_time = measure_time(kmeans_torch, "cpu", N, D, A, K, 100, 1e-4, "cpu", distance_metric="l2")
+    cosine_cpu_result, cosine_cpu_time = measure_time(kmeans_torch, "cpu", N, D, A, K, 100, 1e-4, "cpu", distance_metric="cosine")
 
-    return N, D, "KMeans Torch CPU vs GPU", cpu_time, gpu_torch_time
+    return N, D, "KMeans Torch CPU", l2_cpu_time, cosine_cpu_time
+
+def test_kmeans_torch_gpu(N, D, A, K):
+    # measure_time(kmeans_torch, "cpu", N, D, A, 1) # warmup
+    measure_time(kmeans_torch, "cpu", N, D, A, 1, 100, 1e-4, "cpu", distance_metric="l2") # warmup
+    # GPU Torch l2 vs. cosine
+    l2_gpu_result, l2_gpu_time = measure_time(kmeans_torch, "cuda", N, D, A, K, 100, 1e-4, "cuda", distance_metric="l2")
+    cosine_gpu_result, cosine_gpu_time = measure_time(kmeans_torch, "cuda", N, D, A, K, 100, 1e-4, "cuda", distance_metric="cosine")
+
+    return N, D, "KMeans Torch GPU", l2_gpu_time, cosine_gpu_time
+
+def test_kmeans_numpy(N, D, A, K):
+    # CPU Numpy l2 vs. cosine
+    l2_numpy_result, l2_numpy_time = measure_time(kmeans_numpy, "cpu", N, D, A, K, distance_metric="l2")
+    cosine_numpy_result, cosine_numpy_time = measure_time(kmeans_numpy, "cpu", N, D, A, K, distance_metric="cosine")
+
+    return N, D, "KMeans Numpy", l2_numpy_time, cosine_numpy_time
 
 def test_kmeans_cupy_1(N, D, A, K):
-    # N, D, A, K = testdata_kmeans("")
-    cpu_result, cpu_time = measure_time(kmeans_numpy, "cpu", N, D, A, K)
-    gpu_cupy_result, gpu_cupy_time = measure_time(kmeans_cupy_1, "cuda", N, D, A, K)
+    # GPU Cupy with native functions l2 vs. cosine
+    l2_cupy_result, l2_cupy_time = measure_time(kmeans_cupy_1, "cuda", N, D, A, K, distance_metric="l2")
+    cosine_cupy_result, cosine_cupy_time = measure_time(kmeans_cupy_1, "cuda", N, D, A, K, distance_metric="cosine")
 
-    return N, D, "KMeans CuPy 1", cpu_time, gpu_cupy_time
+    return N, D, "KMeans CuPy 1", l2_cupy_time, cosine_cupy_time
 
 def test_kmeans_cupy_2(N, D, A, K):
-    # N, D, A, K = testdata_kmeans("")
-    cpu_result, cpu_time = measure_time(kmeans_numpy, "cpu", N, D, A, K)
-    gpu_cupy_result, gpu_cupy_time = measure_time(kmeans_cupy_2, "cuda", N, D, A, K)
-
-    return N, D, "KMeans CuPy 2", cpu_time, gpu_cupy_time
-
-def test_kmeans_l2_cosine(N, D, A, K):
-    # Compares performance of kmeans_cupy_1 with l2 vs. cosine distance kernels
+    # GPU Cupy with custom kernels l2 vs. cosine
     l2_cupy_result, l2_cupy_time = measure_time(kmeans_cupy_2, "cuda", N, D, A, K, distance_metric="l2")
     cosine_cupy_result, cosine_cupy_time = measure_time(kmeans_cupy_2, "cuda", N, D, A, K, distance_metric="cosine")
 
-    return N, D, "KMeans l2 vs. cosine", l2_cupy_time, cosine_cupy_time
+    return N, D, "KMeans CuPy 2", l2_cupy_time, cosine_cupy_time
 
 def test_knn():
     N, D, A, X, K = testdata_knn("")
@@ -729,84 +757,29 @@ def recall_rate(list1, list2):
     """
     return len(set(list1) & set(list2)) / len(list1)
 
-def create_or_load_memmap(filename, shape, dtype):
-    """
-    Create or load a memory-mapped file. If the file already exists, load it in read-only mode.
-    If it doesn't exist, create it and fill it with random data.
-
-    Args:
-        filename (str): Path to the memory-mapped file.
-        shape (tuple): Shape of the array (N, D).
-        dtype (np.dtype): Data type of the array.
-
-    Returns:
-        np.memmap: The memory-mapped array.
-    """
-    if os.path.exists(filename):
-        # Load the existing file in read-only mode
-        print(f"Loading existing memory-mapped file: {filename}")
-        return np.memmap(filename, dtype=dtype, mode='r', shape=shape)
-    else:
-        # Create a new memory-mapped file and fill it with random data
-        print(f"Creating new memory-mapped file: {filename}")
-        large_A = np.memmap(filename, dtype=dtype, mode='w+', shape=shape)
-        large_A[:] = np.random.rand(*shape).astype(dtype)
-        large_A.flush()  # Ensure data is written to disk
-        return large_A
 
 if __name__ == "__main__":
     np.random.seed(123)
 
-    # Test cases for smaller datasets
-    test_cases = [
-        [1000, 2, 10],
-        [1000, 1024, 10],
-        [4000000, 2, 10],
-        [1000, 65536, 10]
-    ]
+    # N_test_cases = [4000]
+    # D_test_cases = [2]
+    N_test_cases = [4000, 4000000]
+    D_test_cases = [2, 32768] # 2^15
+    K = 10
 
     results = []
-    for i in range(len(test_cases)):
-        N = test_cases[i][0]
-        D = test_cases[i][1]
-        A = testdata_kmeans_dynam(N, D)
-        K = test_cases[i][2]
-        
-        results.append(test_kmeans_torch(N, D, A, K))
-        results.append(test_kmeans_cupy_1(N, D, A, K))
-        results.append(test_kmeans_cupy_2(N, D, A, K))
-        results.append(test_kmeans_l2_cosine(N, D, A, K))
-        # results.append(test_knn())
-        # results.append(test_ann())
+    for i, N in enumerate(N_test_cases):
+        for j, D in enumerate(D_test_cases):
+            A_file = f"data/{N}_{D}.npy"
+            A_memmap = np.memmap(A_file, dtype=np.float32, mode='r', shape=(N, D))
+            A = np.array(A_memmap)  # convert to regular numpy array
+            A = A.copy() # force physical mem allocation
 
-    # Handle the large dataset using a memory-mapped file
-    # filename = 'large_data.dat'
-    # shape = (4000000, 65536)
-    # dtype = np.float32
+            # Each of the test_kmeans_ functions compare performance with l2 distance vs cosine distance:
+            results.append(test_kmeans_torch_cpu(N, D, A, K)) # Torch baseline on CPU
+            results.append(test_kmeans_torch_gpu(N, D, A, K))
+            results.append(test_kmeans_numpy(N, D, A, K)) # Numpy baseline on CPU
+            results.append(test_kmeans_cupy_1(N, D, A, K))
+            results.append(test_kmeans_cupy_2(N, D, A, K))            
 
-    # try:
-    #     large_A = create_or_load_memmap(filename, shape, dtype)
-    #     N_large, D_large = large_A.shape
-    #     K = 10
-
-    #     results.append(test_kmeans_torch(N_large, D_large, large_A, K))
-    #     results.append(test_kmeans_cupy_1(N_large, D_large, large_A, K))
-    #     results.append(test_kmeans_cupy_2(N_large, D_large, large_A, K))
-    #     # results.append(test_knn())
-    #     # results.append(test_ann())
-    # except Exception as e:
-    #     print(f"Error handling memory-mapped file: {e}")
-
-    # Print the results
     print_table(results)
-
-
-# KMeans performance
-#  N       | D        | Function                       | CPU Time (s)  | GPU Time (s)  | Speedup 
-# ---------------------------------------------------------------------------------------------------
-# 10000    | 1024     | KMeans Torch CPU vs GPU        | 0.138115      | 0.147309      | 0.94x
-# 10000    | 1024     | KMeans NumPy vs CuPy           | 47.247719      | 0.628899      | 75.13x
-
-# TODO: 
-#   run tests with bigger data
-#   implement cupy cosine distance and test
