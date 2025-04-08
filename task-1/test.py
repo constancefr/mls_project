@@ -30,11 +30,6 @@ def testdata_kmeans(test_file):
             K = data["k"]
             A = np.memmap(A_file, dtype=np.float32, mode='r', shape=(N, D))
         return N, D, A, K
-
-# def testdata_kmeans_dynam(N, D):
-#     # use random data
-#     A = np.random.randn(N, D)
-#     return A
     
 def testdata_knn(test_file):
     if test_file == "":
