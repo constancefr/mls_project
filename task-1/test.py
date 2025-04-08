@@ -15,8 +15,8 @@ def read_data(file_path=""):
 def testdata_kmeans(test_file):
     if test_file == "":
         # use random data
-        N = 10000
-        D = 1024
+        N = 100000
+        D = pow(2,1)
         A = np.random.randn(N, D)
         K = 10
         return N, D, A, K
@@ -28,13 +28,13 @@ def testdata_kmeans(test_file):
             D = data["d"]
             A_file = data["a_file"]
             K = data["k"]
-            A = np.loadtxt(A_file)
+            A = np.memmap(A_file, dtype=np.float32, mode='r', shape=(N, D))
         return N, D, A, K
 
-def testdata_kmeans_dynam(N, D):
-    # use random data
-    A = np.random.randn(N, D)
-    return A
+# def testdata_kmeans_dynam(N, D):
+#     # use random data
+#     A = np.random.randn(N, D)
+#     return A
     
 def testdata_knn(test_file):
     if test_file == "":
