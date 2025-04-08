@@ -31,7 +31,7 @@ The `task1` folder contains the following files:
    ```python
    generate_large_npy_file(n=4000000, d=32768)
 
-4. **generate_data.py**  
+4. **test_data.json**  
     This JSON file is used to specify the characteristics of the dataset that is to be loaded inside test.py. It contains the following parameters:
 
    - **n**: number of vectors.
