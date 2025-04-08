@@ -1,43 +1,58 @@
-# Machine Learning Systems - 2024/2025
+# Task1 - GPU Optimization for Nearest Neighbor Search
 
-Welcome to the repository for the **Machine Learning Systems** course (INFR11269) for the **2024/2025** academic year. This course focuses on building and deploying machine learning systems, with hands-on programming tasks, paper writing, and peer reviews.
+In this task, we focus on implementing GPU-based kernels to optimize various operations related to Nearest Neighbor (NN) Search tasks, which are essential for a wide range of machine learning algorithms, especially in clustering and classification tasks. The goal of this task is to accelerate operations like distance computations, TopK searches, K-Nearest Neighbors (KNN), Approximate Nearest Neighbors (ANN), and K-means clustering by leveraging GPU power.
 
-The full course schedule, assessments, and additional details are available in the official course page:
+### Folder Structure
 
-[Machine Learning Systems - 2024/2025](http://www.drps.ed.ac.uk/24-25/dpt/cxinfr11269.htm)
+The `task1` folder contains the following files:
 
----
+1. **task.py**  
+   This file contains the main implementations for various algorithms and benchmarks. It includes:
+   - **Distance Kernels**: Functions to compute various distance metrics (L2, Cosine, Manhattan, Dot).
+   - **TopK Search**: Functions to perform the top-k nearest neighbors search.
+   - **KNN (K-Nearest Neighbors)**: Implementations of KNN algorithms.
+   - **ANN (Approximate Nearest Neighbors)**: Functions for approximate nearest neighbor search.
+   - **KMeans**: KMeans clustering algorithm implementation.
+   - **Benchmarking Functions**: Functions to benchmark the performance of the algorithms on CPU vs. GPU and measure their efficiency.
 
-## Repository Structure
+   All functions are fully documented inside the file to provide details about their usage, inputs, outputs, and expected behavior.
 
-- [**Task-1**](./task-1): Part 1, Implementing machine learning operators with GPU programming.
-- [**Task-2**](./task-2): Part 2, Integrating the operator into a distributed ML system (ServerlessLLM + RAG).
-- [**Resources**](./resources): Slides and reading materials related to the course.
+2. **test.py**  
+   This file contains functions to generate random datasets or load datasets from `.npy` files to test the algorithms implemented in `task.py`. Key functionalities include:
+   - **Random Data Generation**: Functions to generate synthetic data with a specified number of samples and features.
+   - **Dataset Loading**: Functions to load data from pre-existing `.npy` files, useful for testing with large datasets or previously generated data.
+   
+   The functions inside `test.py` allow users to test the algorithms in `task.py` on various datasets and ensure correctness and performance.
 
----
+3. **generate_data.py**  
+   This file contains a utility function for generating large datasets of random vectors. The function `generate_large_npy_file` allows you to create large `.npy` files (e.g., containing 4 million vectors with 2^15 dimensions) and store them efficiently using memory-mapped files to prevent memory overload. This file can be used to generate datasets for benchmarking or testing the algorithms in `task.py` on large-scale data. 
 
-## Last Update
-- **[05/02/2025]** We have uploaded the code template for the first part of the assessment into the `task-1` folder. Additionally, we have relocated the `pytorch-demo` to the `resources` directory and have included materials for `gpu-programming` in the same directory. The part 1 specification in under the `Assessment` section on Learn.
----
+   **Example**:
+   ```python
+   generate_large_npy_file(n=4000000, d=32768)
 
-## Course Tasks
+4. **test_data.json**  
+    This JSON file is used to specify the characteristics of the dataset that is to be loaded inside test.py. It contains the following parameters:
 
-### Task 1: Triton/Cupy Operator
-- Implement an ML operator using Triton/Cupy.
-- Learn about performance optimization and profiling.
+   - **n**: number of vectors.
+   - **d**: dimension of each vector.
+   - **a_file**: path to the `.npy` file containing the dataset.
+   - **x_file**: path to the `.npy` file containing the query vector.
+   - **k**: number of vectors to retrieve.
 
-### Task 2: Integration into Distributed System
-- Integrate your Task 1 operator into a distributed ML system using ServerlessLLM and RAG.
+### How to use
 
-### Paper Writing
-- Write a paper documenting your work on both tasks in the format of a NeurIPS or ICML paper.
+1. Install the `requirements.txt` file using `pip install -r requirements_1.txt`.
 
----
+2. If needed, generate a large dataset using the generate_data.py file, especially useful for testing on large-scale data. To try with small datasets, you can choose to use `random = True` in `test_knn()` from `task.py`. 
 
-## Course Schedule
+3. Use the task.py functions to run KNN, ANN, or KMeans on the dataset.
 
-The course consists of 10 weeks of lectures and Q&A sessions. Each week has the following structure:
-- **Lectures**: Core topics presented by the primary and guest lecturers.
-- **Q&A Sessions**: Focused on solving problems, demos, and discussing task-related questions.
+4. Run benchmarking functions to compare the performance of CPU-based vs GPU-based implementations.
 
-The full course schedule is available [here](https://browser.ted.is.ed.ac.uk/generate/?courses%5B%5D=INFR11269_SS1_SEM2&period=SEM2&week=26-37).
+
+
+
+   
+
+   
