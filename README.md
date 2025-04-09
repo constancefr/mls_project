@@ -74,9 +74,6 @@ Script to visualize the experiment results (throughput vs. rate and latency at r
 List of Python dependencies required to run the services and test scripts
 
 ### How to Use
-
-### 1. Install Required Packages
-
 Make sure you are in the project directory and
 
 1. **Install Required Packages** 
