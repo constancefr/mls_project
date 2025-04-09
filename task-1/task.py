@@ -382,7 +382,141 @@ def manhattan_distance_kernel(X, Y):
 # Dot Distance
 # ------------------------------------------------------------------------------------------------
 
-#TODO
+def dot_cpu(X, Y):
+
+    """
+    Computes the dot product similarity distance between two vectors using NumPy on the CPU.
+
+    Parameters
+    ----------
+    X : np.ndarray
+        Input vector of shape (D,), must reside in CPU memory.
+    Y : np.ndarray
+        Input vector of shape (D,), must reside in CPU memory.
+
+    Returns
+    -------
+    dist : float
+        Scalar value representing the dot product similarity between X and Y.
+        Returned as a Python float (CPU-resident).
+
+    """
+
+    # Start timer to measure execution time
+    start_time = time.time()
+
+    # Compute the Manhattan distance between vectors X and Y as the sum of absolute differences
+    similarity = X @ Y
+
+    # End timer and calculate the execution time
+    end_time = time.time()
+    execution_time = end_time - start_time
+    print(f"Time: {execution_time:.10f} secs")
+
+    return similarity
+
+def dot_cupy(X, Y):
+
+    """
+    Computes the dot product similarity between two vectors using CuPy on the GPU.
+
+    Parameters
+    ----------
+    X : np.ndarray or cp.ndarray
+        Input vector of shape (D,), either CPU or GPU memory.
+        Will be transferred to GPU if needed.
+    Y : np.ndarray or cp.ndarray
+        Same as X.
+
+    Returns
+    -------
+    dist : cp.ndarray (scalar)
+        Dot product similarity computed on GPU.
+        Computed on GPU, then transferred back to CPU.
+
+    """
+
+    # Start timer to measure execution time
+    start_time = time.time()
+
+    # Transfer input vectors to GPU memory (Cupy arrays)
+    X_gpu = cp.asarray(X)
+    Y_gpu = cp.asarray(Y)
+
+    # Compute the Manhattan distance on the GPU
+    similarity = X_gpu @ Y_gpu
+
+    # End timer and calculate execution time
+    end_time = time.time()
+    execution_time = end_time - start_time
+    print(f"Time: {execution_time:.10f} secs")
+
+    return similarity.get()  # Transfer the result back to CPU as a NumPy float
+
+dot_product_code = """
+extern "C" __global__
+void dot_product(const float* x, const float* y, float* result, int n) {
+    __shared__ float shared_mem[256];
+    
+    int tid = threadIdx.x;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    float temp = 0;
+    while (i < n) {
+        temp += x[i] * y[i];
+        i += blockDim.x * gridDim.x;
+    }
+    
+    shared_mem[tid] = temp;
+    __syncthreads();
+    
+    // Parallel reduction in shared memory
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            shared_mem[tid] += shared_mem[tid + s];
+        }
+        __syncthreads();
+    }
+    
+    if (tid == 0) {
+        atomicAdd(result, shared_mem[0]);
+    }
+}
+"""
+dot_product= cp.RawKernel(dot_product_code, "dot_product")
+
+def dot_kernel(X,Y):
+    """
+    Computes dot product similarity using a custom CUDA kernel.
+    
+    Args:
+        X (cp.ndarray or np.ndarray): Shape (m, d)
+        Y (cp.ndarray or np.ndarray): Shape (n, d)
+    
+    Returns:
+        cp.ndarray: Dot product similarity (m, n)
+    """
+    # Start timer
+    start_time = time.time()
+    X_gpu = cp.asarray(X, dtype=cp.float32)
+    Y_gpu = cp.asarray(Y, dtype=cp.float32)
+    n = X_gpu.shape[0]
+
+    # Launch configuration
+    threads_per_block = 256
+    blocks_per_grid = (n + threads_per_block - 1) // threads_per_block
+    result = cp.zeros(1, dtype=cp.float32)
+    dot_product(
+        (blocks_per_grid,), 
+        (threads_per_block,), 
+        (X_gpu, Y_gpu, result, n)
+    )
+
+    # End timer
+    end_time = time.time()
+    execution_time = end_time - start_time
+    print(f"Time: {execution_time:.10f} secs")
+    return result.get()[0]
 
 # ------------------------------------------------------------------------------------------------
 # Cosine Distance
@@ -882,18 +1016,16 @@ def our_knn_cupy_batching(N, D, A, X, K, distance="l2"):
     for stream in streams:
         stream.synchronize()
 
-    # Select the K nearest neighbors globally
-    if(num_batches > 1):
+    # If multiple batches were processed, find the top-K nearest neighbors globally
+    if num_batches > 1:
         top_k_global_indices = cp.argpartition(all_distances, K)[:K]
+        result = all_indices[top_k_global_indices]
     else:
-        top_k_global_indices = indices
-
-    # Stop measuring the time when we have found the indices
-    end_time = time.time()
-    execution_time = end_time - start_time
+        result = indices  # If only one batch, return its results directly
+    # Measure execution time
+    execution_time = time.time() - start_time
     print(f"Total Time: {execution_time:.6f} seconds")
-
-    return all_indices[top_k_global_indices].get()
+    return result
 
 def our_knn_chunks_manhattan(N, D, A, X, K):
 
@@ -977,14 +1109,15 @@ def our_knn_chunks_manhattan(N, D, A, X, K):
     # Select the K lowest values across batches
     if(num_batches > 1):
         top_k_global_indices = cp.argpartition(all_distances, K)[:K]
+        result = all_indices[top_k_global_indices].get()
     else:
-        top_k_global_indices = indices
+        result = indices.get()
 
     # Stop measuring the time when we have found the indices
     execution_time = time.time() - start_time
     print(f"Total Time: {execution_time:.6f} seconds")
 
-    return all_indices[top_k_global_indices].get()
+    return result
 
 def our_knn_chunks_cosine(N, D, A, X, K):
 
@@ -1071,17 +1204,16 @@ def our_knn_chunks_cosine(N, D, A, X, K):
         all_indices[batch_idx * K : (batch_idx + 1) * K] = indices + batch_start  # Adjust index to match the full dataset
         all_distances[batch_idx * K : (batch_idx + 1) * K] = values
 
-    # If multiple batches were processed, find the K nearest neighbors globally
+    # If multiple batches were processed, find the top-K nearest neighbors globally
     if num_batches > 1:
         top_k_global_indices = cp.argpartition(all_distances, K)[:K]
+        result = all_indices[top_k_global_indices]
     else:
-        top_k_global_indices = indices  # If only one batch, we can directly return the batch's results
-
+        result = indices  # If only one batch, return its results directly
     # Measure execution time
     execution_time = time.time() - start_time
     print(f"Total Time: {execution_time:.6f} seconds")
-
-    return all_indices[top_k_global_indices]
+    return result
 
 def our_knn_chunks_dot(N, D, A, X, K):
 
@@ -1164,15 +1296,14 @@ def our_knn_chunks_dot(N, D, A, X, K):
 
     # If multiple batches were processed, find the top-K nearest neighbors globally
     if num_batches > 1:
-        top_k_global_indices = cp.argpartition(all_distances, -K)[-K:]
+        top_k_global_indices = cp.argpartition(all_distances, K)[:K]
+        result = all_indices[top_k_global_indices]
     else:
-        top_k_global_indices = indices  # If only one batch, return its results directly
-
+        result = indices  # If only one batch, return its results directly
     # Measure execution time
     execution_time = time.time() - start_time
     print(f"Total Time: {execution_time:.6f} seconds")
-
-    return all_indices[top_k_global_indices]
+    return result
 
 def our_knn_chunks_l2(N, D, A, X, K):
 
@@ -1254,14 +1385,13 @@ def our_knn_chunks_l2(N, D, A, X, K):
     # If multiple batches were processed, find the top-K nearest neighbors globally
     if num_batches > 1:
         top_k_global_indices = cp.argpartition(all_distances, K)[:K]
+        result = all_indices[top_k_global_indices]
     else:
-        top_k_global_indices = indices  # If only one batch, return its results directly
-
+        result = indices  # If only one batch, return its results directly
     # Measure execution time
     execution_time = time.time() - start_time
     print(f"Total Time: {execution_time:.6f} seconds")
-
-    return all_indices[top_k_global_indices]
+    return result
 
 
 # ------------------------------------------------------------------------------------------------
@@ -1794,6 +1924,24 @@ def test_manhattan(D):
             print(manhattan_distance_cpu(X,Y))
             print(manhattan_distance_cupy(X,Y))
             print(manhattan_distance_kernel(X,Y))
+
+def test_dot(D):
+    """
+    Tests the dot product similarity calculation between two random vectors using different CPU, Cupy kernels and custom CUDA kernels.
+    Args:
+        D (list of int): A list of integers where each integer represents the dimensionality of the random vectors X and Y.
+    Returns:
+        None: This function prints the results of the similarity calculations and the time spent, but does not return any values.
+    """
+    for d in D:
+        print(d)
+        for i in range(0,3):
+            np.random.seed(42)
+            X = np.random.randn(d).astype(np.float32)
+            Y = np.random.randn(d).astype(np.float32)
+            print(dot_cpu(X,Y))
+            print(dot_cupy(X,Y))
+            print(dot_kernel(X,Y))
 
 def test_cosine(D):
     """
