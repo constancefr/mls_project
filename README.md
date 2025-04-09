@@ -1,6 +1,6 @@
 # Task1 - GPU Optimization for Nearest Neighbor Search
 
-In this task, we focus on implementing GPU-based kernels to optimize various operations related to Nearest Neighbor (NN) Search tasks, which are essential for a wide range of machine learning algorithms, especially in clustering and classification tasks. The goal of this task is to accelerate operations like distance computations, TopK searches, K-Nearest Neighbors (KNN), Approximate Nearest Neighbors (ANN), and K-means clustering by leveraging GPU power.
+In this task, we focus on implementing GPU-based kernels to optimize various operations related to Nearest Neighbor (NN) Search tasks, which are essential for a wide range of machine learning algorithms, especially in clustering and classification tasks. The goal of this task is to accelerate operations like distance computations, TopK searches, K-Nearest Neighbors (KNN), Approximate Nearest Neighbors (ANN), and K-means clustering by leveraging GPU power. All GPU kernels are designed to run on an NVIDIA GTX 1060, optimizing parameters such as batch size, chunk size, and the number of streams, blocks and threads for parallel computation based on its capabilities. This means that more powerful GPUs may be limited by the values assigned to these variables in the code.
 
 ### Folder Structure
 
