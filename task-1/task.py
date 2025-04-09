@@ -1327,17 +1327,13 @@ def our_kmeans_numpy(N, D, A, K, max_iters=100, tol=1e-4, random_state=None, dis
     # Start timer
     start_time = time.time()
 
-    # Ensure A is a NumPy array
-    if not isinstance(A, np.ndarray):
-        A = np.array(A, dtype=np.float32)
-
     memory_limit = 2**28 # assume 2GB of RAM
     batch_size = min(N, memory_limit // (D * A.itemsize))
 
     # Initialise centroids by randomly selecting K data points from A
     rng = np.random.RandomState(seed=random_state)
     indices = rng.choice(N, size=K, replace=False)
-    centroids = A[indices].copy()  # Initial centroids
+    centroids = cp.asarray(A[indices.get()])  # Initial centroids
     assignments = np.zeros(N, dtype=np.int32)  # Array for cluster assignments
 
     # Iterate until convergence or max_iters is reached
@@ -1347,8 +1343,8 @@ def our_kmeans_numpy(N, D, A, K, max_iters=100, tol=1e-4, random_state=None, dis
         for batch_start in range(0, N, batch_size):
             batch_end = min(batch_start + batch_size, N)
 
-            # Extract current batch
-            batch_A = A[batch_start:batch_end]
+            # Extract current batch (ensure it's an np array)
+            batch_A = np.array(A[batch_start:batch_end], dtype=np.float32)
 
             # Find closest indices for the current batch given the chosen distance metric
             assignments[batch_start:batch_end] = numpy_closest_index(batch_A, centroids, distance_metric = distance_metric)
@@ -1359,7 +1355,7 @@ def our_kmeans_numpy(N, D, A, K, max_iters=100, tol=1e-4, random_state=None, dis
 
         for batch_start in range(0, N, batch_size):
             batch_end = min(batch_start + batch_size, N)
-            batch_A = A[batch_start:batch_end]
+            batch_A = np.array(A[batch_start:batch_end], dtype=np.float32)
             batch_assignments = assignments[batch_start:batch_end]
 
             for k in range(K):
@@ -1387,7 +1383,7 @@ def our_kmeans_numpy(N, D, A, K, max_iters=100, tol=1e-4, random_state=None, dis
     # End timer
     end_time = time.time()
     execution_time = end_time - start_time
-    # print(f"Total Time: {execution_time:.6f} seconds")
+    print(f"Total Time: {execution_time:.6f} seconds")
 
     return centroids, assignments, execution_time
 
@@ -1416,15 +1412,12 @@ def our_kmeans_cupy_1(N, D, A, K, max_iters=100, tol=1e-4, distance_metric="l2")
     # Start timer
     start_time = time.time()
 
-    memory_limit = 2**28 # assumer 2GB of RAM
+    memory_limit = 2**28 # assume 2GB of RAM
     batch_size = min(N, memory_limit // (D * A.itemsize))
-
-    # Convert input data to CuPy array
-    A = cp.asarray(A, dtype=cp.float32)
     
     # Initialise centroids
     indices = cp.random.choice(N, K, replace=False)
-    centroids = A[indices].copy()
+    centroids = cp.asarray(A[indices.get()]) # copy??
     
     for _ in range(max_iters):
         cluster_assignments = cp.zeros(N, dtype=cp.int32)
@@ -1432,7 +1425,9 @@ def our_kmeans_cupy_1(N, D, A, K, max_iters=100, tol=1e-4, distance_metric="l2")
         # Assign clusters, processing A in batches
         for batch_start in range(0, N, batch_size):
             batch_end = min(batch_start + batch_size, N)
-            batch_A = A[batch_start:batch_end]
+
+            # Move batch to GPU
+            batch_A = cp.asarray(A[batch_start:batch_end])
 
             # Compute distances based on selected metric
             if distance_metric == "l2":
@@ -1455,7 +1450,7 @@ def our_kmeans_cupy_1(N, D, A, K, max_iters=100, tol=1e-4, distance_metric="l2")
         
         for batch_start in range(0, N, batch_size):
             batch_end = min(batch_start + batch_size, N)
-            batch_A = A[batch_start:batch_end]
+            batch_A = cp.asarray(A[batch_start:batch_end])
             batch_assignments = cluster_assignments[batch_start:batch_end]
             
             for k in range(K):
@@ -1482,7 +1477,7 @@ def our_kmeans_cupy_1(N, D, A, K, max_iters=100, tol=1e-4, distance_metric="l2")
     # End timer
     end_time = time.time()
     execution_time = end_time - start_time
-    # print(f"Total Time: {execution_time:.6f} seconds")
+    print(f"Total Time: {execution_time:.6f} seconds")
     
     return cluster_assignments.get(), execution_time
 
@@ -1680,14 +1675,10 @@ def our_kmeans_cupy_2(N,D,A,K, max_iters=100, tol=1e-4, random_state=None, batch
     memory_limit = 2**28
     batch_size = min(N, memory_limit // (D * A.itemsize))
 
-    # Convert to cupy
-    if isinstance(A, np.ndarray):
-        A = cp.asarray(A, dtype=cp.float32) # ASARRAY INSTEAD OF ARRAY TO AVOID COPY (unnecessary data transfer)
-
     # Initialise centroids by randomly selecting K data points from A
     cp.random.seed(random_state)
     indices = cp.random.choice(N, size=K, replace=False)
-    centroids = A[indices].copy() # AVOID COPY??
+    centroids = cp.asarray(A[indices.get()]) # COPY??
     assignments = cp.zeros(N, dtype=cp.int32)
 
     # Create multiple streams for concurrent execution
@@ -1701,7 +1692,9 @@ def our_kmeans_cupy_2(N,D,A,K, max_iters=100, tol=1e-4, random_state=None, batch
         for batch_idx, batch_start in enumerate(range(0, N, batch_size)):
             stream = streams[batch_idx % num_streams] # cycle through streams
             batch_end = min(batch_start + batch_size, N)
-            batch_A = A[batch_start:batch_end]
+
+            # Move batch A to GPU
+            batch_A = cp.asarray(A[batch_start:batch_end])
             
             with stream:
                 assignments[batch_start:batch_end] = cupy_closest_index(
@@ -1719,7 +1712,9 @@ def our_kmeans_cupy_2(N,D,A,K, max_iters=100, tol=1e-4, random_state=None, batch
         
         for batch_start in range(0, N, batch_size):
             batch_end = min(batch_start + batch_size, N)
-            batch_A = A[batch_start:batch_end]
+
+            # Move batch A to GPU
+            batch_A = cp.asarray(A[batch_start:batch_end])
             batch_assignments = assignments[batch_start:batch_end]
             
             # Accumulate sums and counts
@@ -1749,7 +1744,7 @@ def our_kmeans_cupy_2(N,D,A,K, max_iters=100, tol=1e-4, random_state=None, batch
     # End timer
     end_time = time.time()
     execution_time = end_time - start_time
-    # print(f"Total Time: {execution_time:.6f} seconds")
+    print(f"Total Time: {execution_time:.6f} seconds")
     
     return centroids, assignments, execution_time
 
