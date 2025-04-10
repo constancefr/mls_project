@@ -432,7 +432,7 @@ def kmeans_numpy(N, D, A, K, max_iters=100, tol=1e-4, random_state=None, distanc
     # Initialise centroids by randomly selecting K data points from A
     rng = np.random.RandomState(seed=random_state)
     indices = rng.choice(N, size=K, replace=False)
-    centroids = cp.asarray(A[indices.get()])  # Initial centroids (copy??)
+    centroids = np.array(A[indices])  # Initial centroids (copy??)
     assignments = np.zeros(N, dtype=np.int32)  # Array for cluster assignments
 
     # Iterate until convergence or max_iters is reached
@@ -837,7 +837,12 @@ def kmeans_cupy_2(N,D,A,K, max_iters=100, tol=1e-4, random_state=None, batch_siz
                 new_centroids[k] = sums[k] / counts[k]
             else:
                 # Reinitialise empty cluster
-                new_centroids[k] = A[cp.random.randint(0, N, 1)].squeeze(0)
+                rand_idx = np.random.randint(0, N, 1)  # CPU random index
+                new_centroids[k] = cp.asarray(A[rand_idx], dtype=cp.float32).squeeze(0)
+                # new_centroids[k] = A[cp.random.randint(0, N, 1)].squeeze(0)
+
+                # indices = cp.random.choice(N, size=K, replace=False)
+                # centroids = cp.asarray(A[indices.get()])
 
 
         # Check for convergence
