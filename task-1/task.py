@@ -929,16 +929,19 @@ def our_knn_cpu(N, D, A, X, K, distance = "l2"):
     # Concatenate results from all batches
     all_distances = np.concatenate(all_distances)
     all_indices = np.concatenate(all_indices)
-    
     # Select the K nearest neighbors globally
-    top_k_global_indices = np.argpartition(all_distances,K)[:K]
+    if batch_size == N:
+        result = all_indices
+    else:    
+        top_k_global_indices = np.argpartition(all_distances,K)[:K]
+        result = all_indices[top_k_global_indices]
 
     # Stop measuring the time when we have found the indices
     end_time = time.time()
     execution_time = end_time - start_time
     print(f"Total Time: {execution_time:.6f} seconds")
     
-    return all_indices[top_k_global_indices]
+    return result
 
 def our_knn_cupy_batching(N, D, A, X, K, distance="l2"):
 
@@ -1463,7 +1466,7 @@ def our_kmeans_numpy(N, D, A, K, max_iters=100, tol=1e-4, random_state=None, dis
     # Initialise centroids by randomly selecting K data points from A
     rng = np.random.RandomState(seed=random_state)
     indices = rng.choice(N, size=K, replace=False)
-    centroids = cp.asarray(A[indices.get()])  # Initial centroids
+    centroids = np.asarray(A[indices])  # Initial centroids
     assignments = np.zeros(N, dtype=np.int32)  # Array for cluster assignments
 
     # Iterate until convergence or max_iters is reached
@@ -1882,7 +1885,87 @@ def our_kmeans_cupy_2(N,D,A,K, max_iters=100, tol=1e-4, random_state=None, batch
 # ANN (APPROXIMATE NEAREST NEIGHBORS)
 # ------------------------------------------------------------------------------------------------
 
-#TODO
+def our_ann(N, D, A, X, K, assignments=None, means=None, knn_func=our_knn_chunks_l2, kmeans_func=our_kmeans_cupy_2, TOP_K=10):
+    """    
+    Computes the approximate K nearest neighbors (ANN) leveraging KNN and KMeans implementations for GPU optimizations.
+    If assignments and means are not precomputed, they will computed but will increase compute time.
+    With correct hyperparameter choice expect >= 0.7 recall performance on average for large dimensionality and a recall of 1 for small dimensionality.
+    Performs at ~1/2 for small due to KNN overhead, but at high N expect many times faster assuming precomputed means and assignements.
+    Args:
+        N (int): Number of data points in the dataset A.
+        D (int): Number of dimensions of each data point in A and X.
+        A (cupy.ndarray of shape (N,D)): The dataset (NxD matrix) stored on the GPU.
+        X (cupy.ndarray of shape (D,)): The query point (1xD vector) stored on the GPU.
+        K (int): The number of nearest neighbors to find.
+        assignments (cupy.ndarray (N)): Indices of closest clusters for each data point.
+        means (cupy.ndarray (n_clusters, D)): Final centroids of shape.
+        knn_func (function): KNN function to use, must use parameters (N,D,A,X,K)
+        kmeans_func (function): Default KMeans function to call if assignments and means are not defined
+        TOP_K (int): The number of closest clusters to X for KNN to compare to.
+    Returns:
+        numpy.ndarray of shape (K,): The indices of the K nearest neighbors in A, based on L2 distance.
+
+    Memory considerations:
+        The function assumes that A and X are loaded on the GPU. It uses chunking to handle high-dimensional data and parallelizes the computation with multiple CUDA streams.
+    """
+
+    start_time = time.time()
+    if assignments is None and means is None:
+        k_means_k = np.round(np.sqrt(N))
+        means, assignments = kmeans_func(N, D, A, k_means_k)
+    # Compute distances from means to X (shape: n_means x N)
+    indices = knn_func(means.shape[0],D,means, X, TOP_K)    
+    # Create mask where assignment is one of the top 2 nearest means
+    if type(indices) != cp.ndarray:
+        indices = cp.asarray(indices)
+    mask = cp.isin(assignments, indices)
+    original_indices = cp.nonzero(mask)[0]
+    filtered = A[original_indices.get()]    
+    # Compute approximate KNN on the filtered data
+    approx_knn = knn_func(filtered.shape[0], D, filtered, X, K)    
+    # Map indices back to the original dataset 
+    print(f"ANN completed in {time.time()-start_time:.5f}s")
+    return original_indices[approx_knn]
+
+def our_ann_numpy(N, D, A, X, K, assignments=None, means=None, knn_func=our_knn_cpu, kmeans_func=our_kmeans_numpy, TOP_K=10):
+    start_time = time.time()
+    """    
+    Computes the approximate K nearest neighbors (ANN).
+    If assignments and means are not precomputed, they will computed but will increase compute time.
+    With correct hyperparameter choice expect >= 0.7 recall performance on average for large dimensionality and a recall of 1 for small dimensionality.
+    Performs at ~1/2 for small due to KNN overhead, but at high N expect many times faster assuming precomputed means and assignements.
+    Args:
+        N (int): Number of data points in the dataset A.
+        D (int): Number of dimensions of each data point in A and X.
+        A (np.ndarray of shape (N,D)): The dataset (NxD matrix) stored on the GPU.
+        X (np.ndarray of shape (D,)): The query point (1xD vector) stored on the GPU.
+        K (int): The number of nearest neighbors to find.
+        assignments (np.ndarray (N)): Indices of closest clusters for each data point.
+        means (np.ndarray (n_clusters, D)): Final centroids of shape.
+        knn_func (function): KNN function to use, must use parameters (N,D,A,X,K)
+        kmeans_func (function): Default KMeans function to call if assignments and means are not defined
+        TOP_K (int): The number of closest clusters to X for KNN to compare to.
+    Returns:
+        numpy.ndarray of shape (K,): The indices of the K nearest neighbors in A, based on L2 distance.
+    """    
+    if assignments is None or means is None:
+        k_means_k = np.round(np.sqrt(N))
+        means, assignments = kmeans_func(N, D, A, k_means_k)
+    # Compute distances from means to X
+    indices = knn_func(N, D, means, X, TOP_K)
+    
+    # Create mask where assignment is one of the top nearest means
+    if type(indices) != np.ndarray:
+        indices = np.asarray(indices)
+    mask = np.isin(assignments, indices)
+    original_indices = np.nonzero(mask)[0]
+    filtered = A[original_indices]
+    
+    # Compute approximate KNN on filtered data
+    approx_knn = knn_func(filtered.shape[0], D, filtered, X, K)
+    
+    print(f"ANN completed in {time.time()-start_time:.5f}s")
+    return original_indices[approx_knn]
 
 # ------------------------------------------------------------------------------------------------
 # TESTING FUNCTIONS
@@ -2076,7 +2159,45 @@ def test_kmeans(random = False):
         print("GPU (Custom Cuda Kernels)\n")
         our_kmeans_cupy_2(N, D, A, K, distance_metric="cosine")
 
+def test_ann(random = False):
+    """
+    Tests ANN on GPU and CPU.
+    The implementations are: Numpy CPU, and CuPy GPU    
+    Args:
+        random (bool, optional): If True, generates random test data; if False, loads test data from a JSON file. Defaults to False. When set to False,
+                the function will look for a file called "test_data.json" in the "Data" folder. If the file is not found, it will raise an error. This JSON ç
+                must have the following format:
+                {
+                    "n": Number of vector in the datastet,
+                    "d": Dimension of each vector,
+                    "a_file": path to the dataset file, which must be a .npy file,
+                    "x_file": path to the query vector file, which must be a .npy file,
+                    "k": number of elements to retrieve,
+                    "k_1": the number of clusters to generate
+                    "k_2": the number of clusters to select
+                }
+    Returns:
+        None: This function prints the results of the KMeans and the time spent by each implementations, but does not return any values.
+    """
 
+    if random:
+        N, D, A, K, K_1, K_2 = testdata_ann("")
+    else:
+        N, D, A, K, K_1, K_2 = testdata_ann("test_data.json")
+    
+    print("N: ", N)
+    print("D: ", D)
+
+    print("\nL2")
+    for i in range(0, 2):
+        print("Iteration: ", i)
+        kmeans = our_kmeans_cupy_2(N, D, A, K_1)
+        means, assignments = m[0], m[1]
+        print("CPU (Numpy)")
+        our_ann_numpy(N, D, A, K, means.get(), assignments.get(), knn_func=our_knn_cpu, TOP_K=K_2)
+        print("GPU (CuPy)")
+        our_ann_numpy(N, D, A, K, means, assignments, knn_func=our_knn_chunks_l2, TOP_K=K_2)
+        
 #TODO: Add testing functions for dot distance. Add tests for ANN.
 
 if __name__ == "__main__":
