@@ -1674,7 +1674,7 @@ void closest_index_cosine(const float* x, float* y, int* output, const int N, co
     int i = blockIdx.x;  // Each block handles one vector x[i]
     int num_threads = blockDim.x;
 
-    float max_sim = -99999999.0;  // Cosine similarity ranges from -1 to 1
+    float max_sim = 99999999.0;  // Cosine similarity ranges from -1 to 1
     int max_index = -1;
 
     // Grid-stride loop over M y vectors
@@ -2086,3 +2086,4 @@ if __name__ == "__main__":
     test_manhattan(D = [2, 1024, 2**15,2**20])
     test_l2(D = [2, 1024, 2**15,2**20])
     test_cosine(D = [2, 1024, 2**15,2**20])
+    test_dot(D = [2, 1024, 2**15,2**20])
