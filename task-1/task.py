@@ -1333,7 +1333,7 @@ def our_kmeans_numpy(N, D, A, K, max_iters=100, tol=1e-4, random_state=None, dis
     # Initialise centroids by randomly selecting K data points from A
     rng = np.random.RandomState(seed=random_state)
     indices = rng.choice(N, size=K, replace=False)
-    centroids = cp.asarray(A[indices.get()])  # Initial centroids
+    centroids = np.array(A[indices])  # Initial centroids
     assignments = np.zeros(N, dtype=np.int32)  # Array for cluster assignments
 
     # Iterate until convergence or max_iters is reached
@@ -1417,7 +1417,7 @@ def our_kmeans_cupy_1(N, D, A, K, max_iters=100, tol=1e-4, distance_metric="l2")
     
     # Initialise centroids
     indices = cp.random.choice(N, K, replace=False)
-    centroids = cp.asarray(A[indices.get()]) # copy??
+    centroids = cp.asarray(A[indices.get()])
     
     for _ in range(max_iters):
         cluster_assignments = cp.zeros(N, dtype=cp.int32)
@@ -1678,7 +1678,7 @@ def our_kmeans_cupy_2(N,D,A,K, max_iters=100, tol=1e-4, random_state=None, batch
     # Initialise centroids by randomly selecting K data points from A
     cp.random.seed(random_state)
     indices = cp.random.choice(N, size=K, replace=False)
-    centroids = cp.asarray(A[indices.get()]) # COPY??
+    centroids = cp.asarray(A[indices.get()])
     assignments = cp.zeros(N, dtype=cp.int32)
 
     # Create multiple streams for concurrent execution
@@ -1731,7 +1731,8 @@ def our_kmeans_cupy_2(N,D,A,K, max_iters=100, tol=1e-4, random_state=None, batch
                 new_centroids[k] = sums[k] / counts[k]
             else:
                 # Reinitialise empty cluster
-                new_centroids[k] = A[cp.random.randint(0, N, 1)].squeeze(0)
+                rand_idx = np.random.randint(0, N, 1)  # CPU random index
+                new_centroids[k] = cp.asarray(A[rand_idx], dtype=cp.float32).squeeze(0)
 
 
         # Check for convergence
