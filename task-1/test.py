@@ -61,7 +61,9 @@ def testdata_ann(test_file):
         A = np.random.randn(N, D)
         X = np.random.randn(D)
         K = 10
-        return N, D, A, X, K
+        K_1 = 256
+        K_2 = 100
+        return N, D, A, X, K, K_1, K_2
     else:
         # read n, d, a_file, x_file, k from test_file.json
         with open(test_file, "r") as f:
@@ -73,4 +75,6 @@ def testdata_ann(test_file):
             K = data["k"]
             X = np.memmap(X_file, dtype=np.float32, mode='r', shape=(D,))
             A = np.memmap(A_file, dtype=np.float32, mode='r', shape=(N, D))
-        return N, D, A, X, K
+            K_1 = data["k_1"]
+            K_2 = data["k_2"]
+        return N, D, A, X, K, K_1, K_2

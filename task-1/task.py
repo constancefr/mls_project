@@ -382,7 +382,141 @@ def manhattan_distance_kernel(X, Y):
 # Dot Distance
 # ------------------------------------------------------------------------------------------------
 
-#TODO
+def dot_cpu(X, Y):
+
+    """
+    Computes the dot product similarity distance between two vectors using NumPy on the CPU.
+
+    Parameters
+    ----------
+    X : np.ndarray
+        Input vector of shape (D,), must reside in CPU memory.
+    Y : np.ndarray
+        Input vector of shape (D,), must reside in CPU memory.
+
+    Returns
+    -------
+    dist : float
+        Scalar value representing the dot product similarity between X and Y.
+        Returned as a Python float (CPU-resident).
+
+    """
+
+    # Start timer to measure execution time
+    start_time = time.time()
+
+    # Compute the Manhattan distance between vectors X and Y as the sum of absolute differences
+    similarity = X @ Y
+
+    # End timer and calculate the execution time
+    end_time = time.time()
+    execution_time = end_time - start_time
+    print(f"Time: {execution_time:.10f} secs")
+
+    return similarity
+
+def dot_cupy(X, Y):
+
+    """
+    Computes the dot product similarity between two vectors using CuPy on the GPU.
+
+    Parameters
+    ----------
+    X : np.ndarray or cp.ndarray
+        Input vector of shape (D,), either CPU or GPU memory.
+        Will be transferred to GPU if needed.
+    Y : np.ndarray or cp.ndarray
+        Same as X.
+
+    Returns
+    -------
+    dist : cp.ndarray (scalar)
+        Dot product similarity computed on GPU.
+        Computed on GPU, then transferred back to CPU.
+
+    """
+
+    # Start timer to measure execution time
+    start_time = time.time()
+
+    # Transfer input vectors to GPU memory (Cupy arrays)
+    X_gpu = cp.asarray(X)
+    Y_gpu = cp.asarray(Y)
+
+    # Compute the Manhattan distance on the GPU
+    similarity = X_gpu @ Y_gpu
+
+    # End timer and calculate execution time
+    end_time = time.time()
+    execution_time = end_time - start_time
+    print(f"Time: {execution_time:.10f} secs")
+
+    return similarity.get()  # Transfer the result back to CPU as a NumPy float
+
+dot_product_code = """
+extern "C" __global__
+void dot_product(const float* x, const float* y, float* result, int n) {
+    __shared__ float shared_mem[256];
+    
+    int tid = threadIdx.x;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    float temp = 0;
+    while (i < n) {
+        temp += x[i] * y[i];
+        i += blockDim.x * gridDim.x;
+    }
+    
+    shared_mem[tid] = temp;
+    __syncthreads();
+    
+    // Parallel reduction in shared memory
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            shared_mem[tid] += shared_mem[tid + s];
+        }
+        __syncthreads();
+    }
+    
+    if (tid == 0) {
+        atomicAdd(result, shared_mem[0]);
+    }
+}
+"""
+dot_product= cp.RawKernel(dot_product_code, "dot_product")
+
+def dot_kernel(X,Y):
+    """
+    Computes dot product similarity using a custom CUDA kernel.
+    
+    Args:
+        X (cp.ndarray or np.ndarray): Shape (m, d)
+        Y (cp.ndarray or np.ndarray): Shape (n, d)
+    
+    Returns:
+        cp.ndarray: Dot product similarity (m, n)
+    """
+    # Start timer
+    start_time = time.time()
+    X_gpu = cp.asarray(X, dtype=cp.float32)
+    Y_gpu = cp.asarray(Y, dtype=cp.float32)
+    n = X_gpu.shape[0]
+
+    # Launch configuration
+    threads_per_block = 256
+    blocks_per_grid = (n + threads_per_block - 1) // threads_per_block
+    result = cp.zeros(1, dtype=cp.float32)
+    dot_product(
+        (blocks_per_grid,), 
+        (threads_per_block,), 
+        (X_gpu, Y_gpu, result, n)
+    )
+
+    # End timer
+    end_time = time.time()
+    execution_time = end_time - start_time
+    print(f"Time: {execution_time:.10f} secs")
+    return result.get()[0]
 
 # ------------------------------------------------------------------------------------------------
 # Cosine Distance
@@ -795,16 +929,19 @@ def our_knn_cpu(N, D, A, X, K, distance = "l2"):
     # Concatenate results from all batches
     all_distances = np.concatenate(all_distances)
     all_indices = np.concatenate(all_indices)
-    
     # Select the K nearest neighbors globally
-    top_k_global_indices = np.argpartition(all_distances,K)[:K]
+    if batch_size == N:
+        result = all_indices
+    else:    
+        top_k_global_indices = np.argpartition(all_distances,K)[:K]
+        result = all_indices[top_k_global_indices]
 
     # Stop measuring the time when we have found the indices
     end_time = time.time()
     execution_time = end_time - start_time
     print(f"Total Time: {execution_time:.6f} seconds")
     
-    return all_indices[top_k_global_indices]
+    return result
 
 def our_knn_cupy_batching(N, D, A, X, K, distance="l2"):
 
@@ -882,18 +1019,16 @@ def our_knn_cupy_batching(N, D, A, X, K, distance="l2"):
     for stream in streams:
         stream.synchronize()
 
-    # Select the K nearest neighbors globally
-    if(num_batches > 1):
+    # If multiple batches were processed, find the top-K nearest neighbors globally
+    if num_batches > 1:
         top_k_global_indices = cp.argpartition(all_distances, K)[:K]
+        result = all_indices[top_k_global_indices]
     else:
-        top_k_global_indices = indices
-
-    # Stop measuring the time when we have found the indices
-    end_time = time.time()
-    execution_time = end_time - start_time
+        result = indices  # If only one batch, return its results directly
+    # Measure execution time
+    execution_time = time.time() - start_time
     print(f"Total Time: {execution_time:.6f} seconds")
-
-    return all_indices[top_k_global_indices].get()
+    return result
 
 def our_knn_chunks_manhattan(N, D, A, X, K):
 
@@ -977,14 +1112,15 @@ def our_knn_chunks_manhattan(N, D, A, X, K):
     # Select the K lowest values across batches
     if(num_batches > 1):
         top_k_global_indices = cp.argpartition(all_distances, K)[:K]
+        result = all_indices[top_k_global_indices].get()
     else:
-        top_k_global_indices = indices
+        result = indices.get()
 
     # Stop measuring the time when we have found the indices
     execution_time = time.time() - start_time
     print(f"Total Time: {execution_time:.6f} seconds")
 
-    return all_indices[top_k_global_indices].get()
+    return result
 
 def our_knn_chunks_cosine(N, D, A, X, K):
 
@@ -1071,17 +1207,16 @@ def our_knn_chunks_cosine(N, D, A, X, K):
         all_indices[batch_idx * K : (batch_idx + 1) * K] = indices + batch_start  # Adjust index to match the full dataset
         all_distances[batch_idx * K : (batch_idx + 1) * K] = values
 
-    # If multiple batches were processed, find the K nearest neighbors globally
+    # If multiple batches were processed, find the top-K nearest neighbors globally
     if num_batches > 1:
         top_k_global_indices = cp.argpartition(all_distances, K)[:K]
+        result = all_indices[top_k_global_indices]
     else:
-        top_k_global_indices = indices  # If only one batch, we can directly return the batch's results
-
+        result = indices  # If only one batch, return its results directly
     # Measure execution time
     execution_time = time.time() - start_time
     print(f"Total Time: {execution_time:.6f} seconds")
-
-    return all_indices[top_k_global_indices]
+    return result
 
 def our_knn_chunks_dot(N, D, A, X, K):
 
@@ -1164,15 +1299,14 @@ def our_knn_chunks_dot(N, D, A, X, K):
 
     # If multiple batches were processed, find the top-K nearest neighbors globally
     if num_batches > 1:
-        top_k_global_indices = cp.argpartition(all_distances, -K)[-K:]
+        top_k_global_indices = cp.argpartition(all_distances, K)[:K]
+        result = all_indices[top_k_global_indices]
     else:
-        top_k_global_indices = indices  # If only one batch, return its results directly
-
+        result = indices  # If only one batch, return its results directly
     # Measure execution time
     execution_time = time.time() - start_time
     print(f"Total Time: {execution_time:.6f} seconds")
-
-    return all_indices[top_k_global_indices]
+    return result
 
 def our_knn_chunks_l2(N, D, A, X, K):
 
@@ -1254,14 +1388,13 @@ def our_knn_chunks_l2(N, D, A, X, K):
     # If multiple batches were processed, find the top-K nearest neighbors globally
     if num_batches > 1:
         top_k_global_indices = cp.argpartition(all_distances, K)[:K]
+        result = all_indices[top_k_global_indices]
     else:
-        top_k_global_indices = indices  # If only one batch, return its results directly
-
+        result = indices  # If only one batch, return its results directly
     # Measure execution time
     execution_time = time.time() - start_time
     print(f"Total Time: {execution_time:.6f} seconds")
-
-    return all_indices[top_k_global_indices]
+    return result
 
 
 # ------------------------------------------------------------------------------------------------
@@ -1333,7 +1466,7 @@ def our_kmeans_numpy(N, D, A, K, max_iters=100, tol=1e-4, random_state=None, dis
     # Initialise centroids by randomly selecting K data points from A
     rng = np.random.RandomState(seed=random_state)
     indices = rng.choice(N, size=K, replace=False)
-    centroids = np.array(A[indices])  # Initial centroids
+    centroids = np.asarray(A[indices])  # Initial centroids
     assignments = np.zeros(N, dtype=np.int32)  # Array for cluster assignments
 
     # Iterate until convergence or max_iters is reached
@@ -1544,7 +1677,7 @@ void closest_index_cosine(const float* x, float* y, int* output, const int N, co
     int i = blockIdx.x;  // Each block handles one vector x[i]
     int num_threads = blockDim.x;
 
-    float max_sim = -99999999.0;  // Cosine similarity ranges from -1 to 1
+    float max_sim = 99999999.0;  // Cosine similarity ranges from -1 to 1
     int max_index = -1;
 
     // Grid-stride loop over M y vectors
@@ -1753,7 +1886,87 @@ def our_kmeans_cupy_2(N,D,A,K, max_iters=100, tol=1e-4, random_state=None, batch
 # ANN (APPROXIMATE NEAREST NEIGHBORS)
 # ------------------------------------------------------------------------------------------------
 
-#TODO
+def our_ann(N, D, A, X, K, assignments=None, means=None, knn_func=our_knn_chunks_l2, kmeans_func=our_kmeans_cupy_2, TOP_K=10):
+    """    
+    Computes the approximate K nearest neighbors (ANN) leveraging KNN and KMeans implementations for GPU optimizations.
+    If assignments and means are not precomputed, they will computed but will increase compute time.
+    With correct hyperparameter choice expect >= 0.7 recall performance on average for large dimensionality and a recall of 1 for small dimensionality.
+    Performs at ~1/2 for small due to KNN overhead, but at high N expect many times faster assuming precomputed means and assignements.
+    Args:
+        N (int): Number of data points in the dataset A.
+        D (int): Number of dimensions of each data point in A and X.
+        A (cupy.ndarray of shape (N,D)): The dataset (NxD matrix) stored on the GPU.
+        X (cupy.ndarray of shape (D,)): The query point (1xD vector) stored on the GPU.
+        K (int): The number of nearest neighbors to find.
+        assignments (cupy.ndarray (N)): Indices of closest clusters for each data point.
+        means (cupy.ndarray (n_clusters, D)): Final centroids of shape.
+        knn_func (function): KNN function to use, must use parameters (N,D,A,X,K)
+        kmeans_func (function): Default KMeans function to call if assignments and means are not defined
+        TOP_K (int): The number of closest clusters to X for KNN to compare to.
+    Returns:
+        numpy.ndarray of shape (K,): The indices of the K nearest neighbors in A, based on L2 distance.
+
+    Memory considerations:
+        The function assumes that A and X are loaded on the GPU. It uses chunking to handle high-dimensional data and parallelizes the computation with multiple CUDA streams.
+    """
+
+    start_time = time.time()
+    if assignments is None and means is None:
+        k_means_k = np.round(np.sqrt(N))
+        means, assignments = kmeans_func(N, D, A, k_means_k)
+    # Compute distances from means to X (shape: n_means x N)
+    indices = knn_func(means.shape[0],D,means, X, TOP_K)    
+    # Create mask where assignment is one of the top 2 nearest means
+    if type(indices) != cp.ndarray:
+        indices = cp.asarray(indices)
+    mask = cp.isin(assignments, indices)
+    original_indices = cp.nonzero(mask)[0]
+    filtered = A[original_indices.get()]    
+    # Compute approximate KNN on the filtered data
+    approx_knn = knn_func(filtered.shape[0], D, filtered, X, K)    
+    # Map indices back to the original dataset 
+    print(f"ANN completed in {time.time()-start_time:.5f}s")
+    return original_indices[approx_knn]
+
+def our_ann_numpy(N, D, A, X, K, assignments=None, means=None, knn_func=our_knn_cpu, kmeans_func=our_kmeans_numpy, TOP_K=10):
+    start_time = time.time()
+    """    
+    Computes the approximate K nearest neighbors (ANN).
+    If assignments and means are not precomputed, they will computed but will increase compute time.
+    With correct hyperparameter choice expect >= 0.7 recall performance on average for large dimensionality and a recall of 1 for small dimensionality.
+    Performs at ~1/2 for small due to KNN overhead, but at high N expect many times faster assuming precomputed means and assignements.
+    Args:
+        N (int): Number of data points in the dataset A.
+        D (int): Number of dimensions of each data point in A and X.
+        A (np.ndarray of shape (N,D)): The dataset (NxD matrix) stored on the GPU.
+        X (np.ndarray of shape (D,)): The query point (1xD vector) stored on the GPU.
+        K (int): The number of nearest neighbors to find.
+        assignments (np.ndarray (N)): Indices of closest clusters for each data point.
+        means (np.ndarray (n_clusters, D)): Final centroids of shape.
+        knn_func (function): KNN function to use, must use parameters (N,D,A,X,K)
+        kmeans_func (function): Default KMeans function to call if assignments and means are not defined
+        TOP_K (int): The number of closest clusters to X for KNN to compare to.
+    Returns:
+        numpy.ndarray of shape (K,): The indices of the K nearest neighbors in A, based on L2 distance.
+    """    
+    if assignments is None or means is None:
+        k_means_k = np.round(np.sqrt(N))
+        means, assignments = kmeans_func(N, D, A, k_means_k)
+    # Compute distances from means to X
+    indices = knn_func(N, D, means, X, TOP_K)
+    
+    # Create mask where assignment is one of the top nearest means
+    if type(indices) != np.ndarray:
+        indices = np.asarray(indices)
+    mask = np.isin(assignments, indices)
+    original_indices = np.nonzero(mask)[0]
+    filtered = A[original_indices]
+    
+    # Compute approximate KNN on filtered data
+    approx_knn = knn_func(filtered.shape[0], D, filtered, X, K)
+    
+    print(f"ANN completed in {time.time()-start_time:.5f}s")
+    return original_indices[approx_knn]
 
 # ------------------------------------------------------------------------------------------------
 # TESTING FUNCTIONS
@@ -1795,6 +2008,24 @@ def test_manhattan(D):
             print(manhattan_distance_cpu(X,Y))
             print(manhattan_distance_cupy(X,Y))
             print(manhattan_distance_kernel(X,Y))
+
+def test_dot(D):
+    """
+    Tests the dot product similarity calculation between two random vectors using different CPU, Cupy kernels and custom CUDA kernels.
+    Args:
+        D (list of int): A list of integers where each integer represents the dimensionality of the random vectors X and Y.
+    Returns:
+        None: This function prints the results of the similarity calculations and the time spent, but does not return any values.
+    """
+    for d in D:
+        print(d)
+        for i in range(0,3):
+            np.random.seed(42)
+            X = np.random.randn(d).astype(np.float32)
+            Y = np.random.randn(d).astype(np.float32)
+            print(dot_cpu(X,Y))
+            print(dot_cupy(X,Y))
+            print(dot_kernel(X,Y))
 
 def test_cosine(D):
     """
@@ -1929,7 +2160,45 @@ def test_kmeans(random = False):
         print("GPU (Custom Cuda Kernels)\n")
         our_kmeans_cupy_2(N, D, A, K, distance_metric="cosine")
 
+def test_ann(random = False):
+    """
+    Tests ANN on GPU and CPU.
+    The implementations are: Numpy CPU, and CuPy GPU    
+    Args:
+        random (bool, optional): If True, generates random test data; if False, loads test data from a JSON file. Defaults to False. When set to False,
+                the function will look for a file called "test_data.json" in the "Data" folder. If the file is not found, it will raise an error. This JSON ç
+                must have the following format:
+                {
+                    "n": Number of vector in the datastet,
+                    "d": Dimension of each vector,
+                    "a_file": path to the dataset file, which must be a .npy file,
+                    "x_file": path to the query vector file, which must be a .npy file,
+                    "k": number of elements to retrieve,
+                    "k_1": the number of clusters to generate
+                    "k_2": the number of clusters to select
+                }
+    Returns:
+        None: This function prints the results of the KMeans and the time spent by each implementations, but does not return any values.
+    """
 
+    if random:
+        N, D, A, K, K_1, K_2 = testdata_ann("")
+    else:
+        N, D, A, K, K_1, K_2 = testdata_ann("test_data.json")
+    
+    print("N: ", N)
+    print("D: ", D)
+
+    print("\nL2")
+    for i in range(0, 2):
+        print("Iteration: ", i)
+        kmeans = our_kmeans_cupy_2(N, D, A, K_1)
+        means, assignments = m[0], m[1]
+        print("CPU (Numpy)")
+        our_ann_numpy(N, D, A, K, means.get(), assignments.get(), knn_func=our_knn_cpu, TOP_K=K_2)
+        print("GPU (CuPy)")
+        our_ann_numpy(N, D, A, K, means, assignments, knn_func=our_knn_chunks_l2, TOP_K=K_2)
+        
 #TODO: Add testing functions for dot distance. Add tests for ANN.
 
 if __name__ == "__main__":
@@ -1939,3 +2208,4 @@ if __name__ == "__main__":
     test_manhattan(D = [2, 1024, 2**15,2**20])
     test_l2(D = [2, 1024, 2**15,2**20])
     test_cosine(D = [2, 1024, 2**15,2**20])
+    test_dot(D = [2, 1024, 2**15,2**20])
