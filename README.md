@@ -37,7 +37,7 @@ The `task1` folder contains the following files:
    - **x_file**: path to the `.npy` file containing the query vector.
    - **k**: number of vectors to retrieve.
 
-5. **requirements_2.py** 
+5. **requirements_1.txt** 
    List of Python dependencies required to run the code of task 1.
 
 ### How to use
@@ -70,7 +70,7 @@ Script to load test any RAG service. Reports latency and throughput at various r
 4. **generate_plots.py**  
 Script to visualize the experiment results (throughput vs. rate and latency at rate=100)
 
-5. **requirements_2.py** 
+5. **requirements_2.txt** 
 List of Python dependencies required to run the services and test scripts
 
 ### How to Use
